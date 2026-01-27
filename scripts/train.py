@@ -17,13 +17,7 @@ from src.data.collate import collate_windows
 
 from src.models.full_model import FusionODERNNModel
 from src.train.engine import train_one_epoch, eval_one_epoch
-
-
-def set_seed(seed: int = 0):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+from src.utils.seed import set_seed
 
 
 def compute_target_scaler(ds_subset: Subset) -> tuple[torch.Tensor, torch.Tensor]:
@@ -54,7 +48,7 @@ def main():
     # ---- hyperparams ----
     window_size = 5
     predict_last = True
-    max_cells = 512
+    n_cells_per_bag = 512
     batch_size = 8
     lr = 3e-4
     weight_decay = 1e-4
@@ -72,35 +66,26 @@ def main():
     print("[Device]", device)
     print(f"[Split] train={train_condition} | val={val_condition}")
 
-    # ---- load + build trajectories ----
+    # ---- load + build trajectories (Cell-Level Split) ----
     df_cnn = read_cnn(path_cnn)
     df_morph = read_morph(path_morph)
     df_tgt = read_targets(path_tgt)
 
-    traj = build_trajectories(df_cnn, df_morph, df_tgt, max_cells=max_cells, seed=0)
+    # 返回 (traj_train, traj_val, traj_test)
+    print(f"[Build] Splitting cells 70% Train / 15% Val / 15% Test per timepoint...")
+    traj_train, traj_val, traj_test = build_trajectories(
+        df_cnn, df_morph, df_tgt,
+        n_cells_per_bag=n_cells_per_bag,
+        split_ratios=(0.7, 0.15, 0.15),
+        seed=0
+    )
 
     # ---- dataset ----
-    ds = SlidingWindowDataset(traj, window_size=window_size, predict_last=predict_last)
+    ds_train = SlidingWindowDataset(traj_train, window_size=window_size, predict_last=predict_last)
+    ds_val = SlidingWindowDataset(traj_val, window_size=window_size, predict_last=predict_last)
+    ds_test = SlidingWindowDataset(traj_test, window_size=window_size, predict_last=predict_last)
 
-    train_idx, val_idx = [], []
-    for i in range(len(ds)):
-        cid = ds[i]["cid"]
-        if cid == train_condition:
-            train_idx.append(i)
-        elif cid == val_condition:
-            val_idx.append(i)
-
-    if len(train_idx) == 0 or len(val_idx) == 0:
-        all_cids = sorted({ds[i]["cid"] for i in range(len(ds))})
-        raise ValueError(
-            f"按 condition 划分失败：train_idx={len(train_idx)}, val_idx={len(val_idx)}. "
-            f"当前 cid: {all_cids}"
-        )
-
-    ds_train = Subset(ds, train_idx)
-    ds_val = Subset(ds, val_idx)
-
-    print(f"[Dataset] total={len(ds)} | train_windows={len(ds_train)} | val_windows={len(ds_val)}")
+    print(f"[Dataset] train={len(ds_train)} | val={len(ds_val)} | test={len(ds_test)}")
 
     # ---- target scaler from TRAIN only ----
     y_mean, y_std = compute_target_scaler(ds_train)
@@ -139,7 +124,7 @@ def main():
     best_val_norm = float("inf")
     bad_epochs = 0
 
-    ckpt_path = os.path.join(root, "runs", f"best_ode_{train_condition}_to_{val_condition}.pt")
+    ckpt_path = os.path.join(root, "runs", "best_ode_cell_split.pt")
 
     for ep in range(1, epochs + 1):
         tr = train_one_epoch(model, dl_train, optimizer, device, y_mean=y_mean, y_std=y_std, grad_clip=1.0)
@@ -186,6 +171,22 @@ def main():
     print("[Done] best_val_mse_raw  =", best_val_raw)
     print("[Done] best_val_mse_norm =", best_val_norm)
     print("[Best ckpt]", ckpt_path)
+
+    # ---- Final Test Evaluation ----
+    print("\n[Test] Loading best checkpoint for final evaluation...")
+    if len(ds_test) > 0:
+        checkpoint = torch.load(ckpt_path, map_location=device)
+        model.load_state_dict(checkpoint["model"])
+        
+        # Test Loader
+        dl_test = DataLoader(ds_test, batch_size=batch_size, shuffle=False, num_workers=0, collate_fn=collate_windows)
+        
+        # Evaluate
+        test_metrics = eval_one_epoch(model, dl_test, device, y_mean=y_mean, y_std=y_std)
+        print(f"[Test Result] mse_raw={test_metrics['mse_raw']:.6f} | mse_norm={test_metrics['mse_norm']:.6f}")
+        print(f"[Test RMSE] t0={test_metrics['rmse_raw_t0']:.4f}, t1={test_metrics['rmse_raw_t1']:.4f}, t2={test_metrics['rmse_raw_t2']:.4f}, t3={test_metrics['rmse_raw_t3']:.4f}")
+    else:
+        print("[Test] No test data available (ds_test is empty).")
 
 
 if __name__ == "__main__":
