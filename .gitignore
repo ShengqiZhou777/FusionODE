@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.ipynb_checkpoints/
+.venv/
+env/
+
+# Data (Too large for GitHub)
+data/*.csv
+data/*.pt
+
+# Experiment Runs & Checkpoints
+runs/
+*.pt
+
+# IDE
+.vscode/
+.idea/
+
+# System
+.DS_Store
