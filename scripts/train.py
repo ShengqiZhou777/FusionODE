@@ -48,30 +48,29 @@ def main():
     # ---- hyperparams ----
     window_size = 5
     predict_last = True
-    n_cells_per_bag = 512
+    n_cells_per_bag = 500
     batch_size = 8
-    lr = 3e-4
+    lr = 1e-2
     weight_decay = 1e-4
     epochs = 200
 
-    # condition split
-    train_condition = "Light"
-    val_condition = "Dark"
+    # condition to train on
+    target_condition = "Light"
 
     # early stopping
     patience = 15
-    min_delta = 0.0  # val_norm 需要至少下降多少才算 improve
+    min_delta = 0.0
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("[Device]", device)
-    print(f"[Split] train={train_condition} | val={val_condition}")
+    print(f"[Target Condition] {target_condition}")
 
     # ---- load + build trajectories (Cell-Level Split) ----
     df_cnn = read_cnn(path_cnn)
     df_morph = read_morph(path_morph)
     df_tgt = read_targets(path_tgt)
 
-    # 返回 (traj_train, traj_val, traj_test)
+    # 返回 (traj_train, traj_val, traj_test) (Contains ALL conditions)
     print(f"[Build] Splitting cells 70% Train / 15% Val / 15% Test per timepoint...")
     traj_train, traj_val, traj_test = build_trajectories(
         df_cnn, df_morph, df_tgt,
@@ -79,6 +78,12 @@ def main():
         split_ratios=(0.7, 0.15, 0.15),
         seed=0
     )
+
+    # ---- Filter for Single Condition ----
+    print(f"[Filter] Keeping only condition: {target_condition}")
+    traj_train = {k: v for k, v in traj_train.items() if k == target_condition}
+    traj_val   = {k: v for k, v in traj_val.items()   if k == target_condition}
+    traj_test  = {k: v for k, v in traj_test.items()  if k == target_condition}
 
     # ---- dataset ----
     ds_train = SlidingWindowDataset(traj_train, window_size=window_size, predict_last=predict_last)
@@ -93,9 +98,9 @@ def main():
     print(" y_mean:", y_mean.tolist())
     print(" y_std :", y_std.tolist())
 
-    # 保存 scaler（以后 eval/反归一化会用到）
+    # 保存 scaler
     os.makedirs(os.path.join(root, "runs"), exist_ok=True)
-    scaler_path = os.path.join(root, "runs", f"scaler_{train_condition}_to_{val_condition}.pt")
+    scaler_path = os.path.join(root, "runs", f"scaler_{target_condition}.pt")
     torch.save({"y_mean": y_mean, "y_std": y_std}, scaler_path)
     print("[Saved scaler]", scaler_path)
 
@@ -124,7 +129,7 @@ def main():
     best_val_norm = float("inf")
     bad_epochs = 0
 
-    ckpt_path = os.path.join(root, "runs", "best_ode_cell_split.pt")
+    ckpt_path = os.path.join(root, "runs", f"best_ode_{target_condition}.pt")
 
     for ep in range(1, epochs + 1):
         tr = train_one_epoch(model, dl_train, optimizer, device, y_mean=y_mean, y_std=y_std, grad_clip=1.0)
@@ -146,8 +151,7 @@ def main():
                     "best_val_mse_norm": best_val_norm,
                     "y_mean": y_mean,
                     "y_std": y_std,
-                    "train_condition": train_condition,
-                    "val_condition": val_condition,
+                    "target_condition": target_condition,
                 },
                 ckpt_path,
             )

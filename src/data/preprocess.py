@@ -4,38 +4,6 @@ import numpy as np
 import pandas as pd
 import torch
 
-def filter_cell_dataframe(df: pd.DataFrame) -> pd.DataFrame:
-    """你的标准细胞筛选规则（只依赖 morph 表字段）"""
-    if "area" in df.columns:
-        df = df[
-            (df["area"] >= 500) &
-            (df["area"] <= 3500) &
-            (df["mean_intensity"] >= 80) &
-            (df["mean_intensity"] <= 140) &
-            (df["circularity"] >= 0.88)
-        ]
-    return df
-
-
-def apply_cell_filter_to_both(df_morph: pd.DataFrame, df_cnn: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    用 morph 的筛选结果，同步过滤 cnn，保证两模态细胞集合一致。
-    优先使用 cell_id；如果没有，就尝试 (condition,time,file,cell_id) 等组合。
-    """
-    df_morph_f = filter_cell_dataframe(df_morph)
-
-    # 使用唯一标识符同步过滤
-    keys = ["condition", "time", "cell_id"]
-    if not (all(col in df_morph_f.columns for col in keys) and all(col in df_cnn.columns for col in keys)):
-        raise ValueError(
-            "无法将 morph 的筛选同步到 cnn：两表缺少共同的字段 ['condition', 'time', 'cell_id']。"
-        )
-
-    keep = df_morph_f[keys].drop_duplicates()
-    df_cnn_f = df_cnn.merge(keep, on=keys, how="inner")
-
-    return df_morph_f, df_cnn_f
-
 
 def build_trajectories(
     df_cnn: pd.DataFrame,
@@ -50,7 +18,6 @@ def build_trajectories(
       n_cells_per_bag: 每个时间点最多采样的细胞数 (Bag Size).
     returns: (traj_train, traj_val, traj_test)
     """
-    df_morph, df_cnn = apply_cell_filter_to_both(df_morph, df_cnn)
     rng = np.random.default_rng(seed)
 
     # --- 找列 ---
@@ -86,9 +53,9 @@ def build_trajectories(
 
         # Containers
         data_containers = {
-            "train": {"times": [], "morph": [], "bags": [], "targets": []},
-            "val":   {"times": [], "morph": [], "bags": [], "targets": []},
-            "test":  {"times": [], "morph": [], "bags": [], "targets": []}
+            "train": {"times": [], "morph": [], "bags": [], "targets": [], "cell_ids": []},
+            "val":   {"times": [], "morph": [], "bags": [], "targets": [], "cell_ids": []},
+            "test":  {"times": [], "morph": [], "bags": [], "targets": [], "cell_ids": []}
         }
 
         for (c, t) in cond_keys:
@@ -110,10 +77,24 @@ def build_trajectories(
                 if len(cell_set) == 0:
                     continue
 
-                # Filter
+                # Filter to current split
                 df_m_sub = df_m[df_m["cell_id"].isin(cell_set)]
+                # Note: df_c_sub filtering deferred to be synced with df_m_sub
+
+                # Subsample cell_ids if needed (shared between Morph and CNN)
+                available_ids = df_m_sub["cell_id"].to_numpy()
+                n_current = len(available_ids)
+                
+                if n_current > n_cells_per_bag:
+                    # Randomly select cell_ids
+                    kept_ids = rng.choice(available_ids, size=n_cells_per_bag, replace=False)
+                else:
+                    kept_ids = available_ids
+                
+                # Apply selection to both
+                df_m_sub = df_m_sub[df_m_sub["cell_id"].isin(kept_ids)]
                 df_c_sub = cnn_groups[(c, t)]
-                df_c_sub = df_c_sub[df_c_sub["cell_id"].isin(cell_set)]
+                df_c_sub = df_c_sub[df_c_sub["cell_id"].isin(kept_ids)]
 
                 # Morph
                 mg = df_m_sub[morph_feat_cols].astype(float)
@@ -126,12 +107,9 @@ def build_trajectories(
 
                 # CNN bags
                 cg = df_c_sub[cnn_feat_cols].astype(float).to_numpy()
-                if cg.shape[0] > n_cells_per_bag:
-                    try:
-                        idx = rng.choice(cg.shape[0], size=n_cells_per_bag, replace=False)
-                        cg = cg[idx]
-                    except ValueError:
-                        pass
+                c_ids = df_c_sub["cell_id"].to_numpy()
+                
+                # Already subsampled via DataFrame iloc above
                 bag_tensor = torch.tensor(cg, dtype=torch.float32)
 
                 # Target
@@ -143,6 +121,7 @@ def build_trajectories(
                 dc["morph"].append(morph_vec)
                 dc["bags"].append(bag_tensor)
                 dc["targets"].append(y)
+                dc["cell_ids"].append(c_ids)
 
         # Pack
         for split_name, out_dict in [("train", traj_train), ("val", traj_val), ("test", traj_test)]:
@@ -153,6 +132,7 @@ def build_trajectories(
                     "morph": torch.tensor(np.stack(dc["morph"]), dtype=torch.float32),
                     "bags": dc["bags"],
                     "targets": torch.tensor(np.stack(dc["targets"]), dtype=torch.float32),
+                    "cell_ids": dc["cell_ids"],
                 }
 
     return traj_train, traj_val, traj_test
