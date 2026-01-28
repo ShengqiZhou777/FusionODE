@@ -18,9 +18,17 @@ from src.data.preprocess import build_trajectories
 from src.data.dataset import SlidingWindowDataset
 from src.data.collate import collate_windows
 
-from src.models.full_model import FusionGRUModel, FusionLSTMModel, FusionODERNNModel
+from src.models.full_model import (
+    FusionGRUModel,
+    FusionLSTMModel,
+    FusionODERNNModel,
+    StaticMLPBaseline,
+)
 from src.train.engine import train_one_epoch, eval_one_epoch
 from src.utils.seed import set_seed
+
+
+TARGET_NAMES = ["Dry_Weight", "Chl_Per_Cell", "Fv_Fm", "Oxygen_Rate"]
 
 
 def compute_target_scaler(ds_subset: Subset) -> tuple[torch.Tensor, torch.Tensor]:
@@ -61,7 +69,7 @@ def build_run_dir(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train Fusion ODE/RNN models with ablations.")
-    parser.add_argument("--model-type", choices=["odernn", "gru", "lstm"], default="odernn")
+    parser.add_argument("--model-type", choices=["odernn", "gru", "lstm", "static"], default="odernn")
     parser.add_argument("--fusion-type", choices=["cross_attention", "concat"], default="cross_attention")
     parser.add_argument("--use-morph", action="store_true", default=True)
     parser.add_argument("--morph-only", dest="use_cnn", action="store_false")
@@ -71,7 +79,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--window-size", type=int, default=4)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--epochs", type=int, default=200)
-    parser.add_argument("--lr", type=float, default=1e-2)
+    parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--n-cells-per-bag", type=int, default=500)
     parser.add_argument("--rnn-hidden", type=int, default=128)
@@ -80,8 +88,115 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ode-hidden", type=int, default=128)
     parser.add_argument("--attn-dim", type=int, default=64)
     parser.add_argument("--attn-heads", type=int, default=4)
+    parser.add_argument("--dropout", type=float, default=0.1)
+    parser.add_argument("--grad-clip", type=float, default=1.0)
+    parser.add_argument(
+        "--time-features",
+        choices=["none", "absolute", "absolute+delta"],
+        default="absolute+delta",
+        help="Time features for GRU/LSTM/static baselines (improves irregular sampling awareness).",
+    )
+    parser.add_argument("--time-scale", type=float, default=None)
+    parser.add_argument("--overfit-n", type=int, default=0)
+    parser.add_argument("--skip-inspect-data", action="store_true")
+    parser.add_argument("--eval-looto", action="store_true")
     parser.add_argument("--run-name", default=None)
     return parser.parse_args()
+
+
+def _inspect_split_overlap(traj_train: dict, traj_val: dict, traj_test: dict) -> None:
+    """
+    Basic sanity checks for leakage or degenerate splits.
+    We only compare cell IDs at the same condition/time to avoid false alarms.
+    """
+    for cond in traj_train.keys():
+        train_ids = traj_train[cond]["cell_ids"]
+        val_ids = traj_val.get(cond, {}).get("cell_ids", [])
+        test_ids = traj_test.get(cond, {}).get("cell_ids", [])
+        for idx, ids in enumerate(train_ids):
+            if idx < len(val_ids):
+                overlap = set(ids).intersection(val_ids[idx])
+                if overlap:
+                    print(f"[Warn] Train/Val leakage at {cond} index {idx}: {len(overlap)} shared cells")
+            if idx < len(test_ids):
+                overlap = set(ids).intersection(test_ids[idx])
+                if overlap:
+                    print(f"[Warn] Train/Test leakage at {cond} index {idx}: {len(overlap)} shared cells")
+
+
+def _prepare_overfit_subset(ds_train: SlidingWindowDataset, ds_val: SlidingWindowDataset, overfit_n: int):
+    """
+    Optional overfit sanity check: train/val on the same tiny subset.
+    Useful to verify the baseline can fit small data without logic bugs.
+    """
+    if overfit_n <= 0:
+        return ds_train, ds_val
+    subset_n = min(overfit_n, len(ds_train))
+    subset_indices = list(range(subset_n))
+    return Subset(ds_train, subset_indices), Subset(ds_train, subset_indices)
+
+
+def _build_time_scale(traj_train: dict, target_condition: str, time_scale: float | None) -> float:
+    if time_scale is not None:
+        return time_scale
+    if target_condition in traj_train:
+        return float(traj_train[target_condition]["times"].max().item())
+    return 1.0
+
+
+def _eval_leave_one_timepoint(
+    model: torch.nn.Module,
+    dataset: SlidingWindowDataset,
+    device: torch.device,
+    y_mean: torch.Tensor,
+    y_std: torch.Tensor,
+    batch_size: int,
+    target_names: list[str],
+    run_dir: str,
+    condition: str,
+    window_size: int,
+) -> None:
+    """
+    Leave-one-timepoint-out evaluation.
+    With few timepoints, R2 can be unstable, so we also report MAE/RMSE.
+    """
+    time_to_indices: dict[float, list[int]] = {}
+    for i in range(len(dataset)):
+        t = float(dataset[i]["times"][-1])
+        time_to_indices.setdefault(t, []).append(i)
+
+    if not time_to_indices:
+        print("[LOOTO] No timepoints found for evaluation.")
+        return
+
+    rows = []
+    for time_value, indices in sorted(time_to_indices.items()):
+        subset = Subset(dataset, indices)
+        dl = DataLoader(
+            subset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=0,
+            collate_fn=collate_windows,
+        )
+        metrics = eval_one_epoch(
+            model,
+            dl,
+            device,
+            y_mean=y_mean,
+            y_std=y_std,
+            target_names=target_names,
+        )
+        metrics_row = {"time": time_value, "n": len(indices)}
+        metrics_row.update(metrics)
+        rows.append(metrics_row)
+
+    looto_path = os.path.join(run_dir, f"looto_metrics_{condition}_w{window_size}.csv")
+    with open(looto_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=rows[0].keys())
+        writer.writeheader()
+        writer.writerows(rows)
+    print(f"[LOOTO] Saved metrics to {looto_path}")
 
 
 def main() -> None:
@@ -107,7 +222,7 @@ def main() -> None:
     mc_test_base_seed = 1000
 
     # model ablations
-    model_type = args.model_type  # "odernn", "gru", "lstm"
+    model_type = args.model_type  # "odernn", "gru", "lstm", "static"
     fusion_type = args.fusion_type  # "cross_attention" or "concat"
     use_morph = args.use_morph
     use_cnn = args.use_cnn
@@ -150,6 +265,7 @@ def main() -> None:
     ds_train = SlidingWindowDataset(traj_train, window_size=window_size, predict_last=predict_last)
     ds_val = SlidingWindowDataset(traj_val, window_size=window_size, predict_last=predict_last)
     ds_test = SlidingWindowDataset(traj_test, window_size=window_size, predict_last=predict_last)
+    ds_train, ds_val = _prepare_overfit_subset(ds_train, ds_val, args.overfit_n)
     # early stopping & scheduler
     patience = 15
     bad_epochs = 0
@@ -163,9 +279,11 @@ def main() -> None:
     min_lr = 1e-6
     
     # Gradient clipping
-    grad_clip = 1.0
+    grad_clip = args.grad_clip
 
     print(f"[Dataset] train={len(ds_train)} | val={len(ds_val)} | test={len(ds_test)}")
+    if not args.skip_inspect_data:
+        _inspect_split_overlap(traj_train, traj_val, traj_test)
 
     # ---- target scaler from TRAIN only ----
     y_mean, y_std = compute_target_scaler(ds_train)
@@ -210,6 +328,9 @@ def main() -> None:
     Dm = batch0["morph"].shape[-1]
     Dc = batch0["bags"].shape[-1]
     
+    time_scale = _build_time_scale(traj_train, target_condition, args.time_scale)
+    time_features = args.time_features
+
     if model_type == "odernn":
         model = FusionODERNNModel(
             morph_dim=Dm,
@@ -218,7 +339,7 @@ def main() -> None:
             z_cnn=64,
             hidden_dim=args.hidden_dim,
             ode_hidden=args.ode_hidden,
-            dropout=0.1,
+            dropout=args.dropout,
             use_morph=use_morph,
             use_cnn=use_cnn,
             fusion_type=fusion_type,
@@ -233,12 +354,15 @@ def main() -> None:
             z_cnn=64,
             rnn_hidden=args.rnn_hidden,
             rnn_layers=args.rnn_layers,
-            dropout=0.1,
+            dropout=args.dropout,
             use_morph=use_morph,
             use_cnn=use_cnn,
             fusion_type=fusion_type,
             attn_dim=args.attn_dim,
             attn_heads=args.attn_heads,
+            use_time=time_features != "none",
+            time_features=time_features,
+            time_scale=time_scale,
         ).to(device)
     elif model_type == "lstm":
         model = FusionLSTMModel(
@@ -248,12 +372,31 @@ def main() -> None:
             z_cnn=64,
             rnn_hidden=args.rnn_hidden,
             rnn_layers=args.rnn_layers,
-            dropout=0.1,
+            dropout=args.dropout,
             use_morph=use_morph,
             use_cnn=use_cnn,
             fusion_type=fusion_type,
             attn_dim=args.attn_dim,
             attn_heads=args.attn_heads,
+            use_time=time_features != "none",
+            time_features=time_features,
+            time_scale=time_scale,
+        ).to(device)
+    elif model_type == "static":
+        model = StaticMLPBaseline(
+            morph_dim=Dm,
+            cnn_dim=Dc,
+            z_morph=64,
+            z_cnn=64,
+            dropout=args.dropout,
+            use_morph=use_morph,
+            use_cnn=use_cnn,
+            fusion_type=fusion_type,
+            attn_dim=args.attn_dim,
+            attn_heads=args.attn_heads,
+            use_time=time_features != "none",
+            time_features=time_features,
+            time_scale=time_scale,
         ).to(device)
     else:
         raise ValueError(f"Unsupported model_type: {model_type}")
@@ -266,9 +409,9 @@ def main() -> None:
         )
 
     # ---- train loop ----
-    ckpt_path = os.path.join(run_dir, f"best_ode_{target_condition}.pt")
+    ckpt_path = os.path.join(run_dir, f"best_{model_type}_{target_condition}.pt")
 
-    target_names = ["Dry_Weight", "Chl_Per_Cell", "Fv_Fm", "Oxygen_Rate"]
+    target_names = TARGET_NAMES
 
     for ep in range(epochs):
         tr = train_one_epoch(model, dl_train, optimizer, device, y_mean=y_mean, y_std=y_std, grad_clip=grad_clip)
@@ -366,7 +509,7 @@ def main() -> None:
         else:
             metrics_list = []
             all_preds_rows = []
-            target_names = ["Dry_Weight", "Chl_Per_Cell", "Fv_Fm", "Oxygen_Rate"]
+            target_names = TARGET_NAMES
 
             for run_idx in range(mc_test_runs):
                 traj_train_mc, traj_val_mc, traj_test_mc = build_trajectories(
@@ -482,6 +625,20 @@ def main() -> None:
             print(f"[MC Preds Saved] {preds_path}")
     else:
         print("[Test] No test data available (ds_test is empty).")
+
+    if args.eval_looto and len(ds_test) > 0:
+        _eval_leave_one_timepoint(
+            model,
+            ds_test,
+            device,
+            y_mean=y_mean,
+            y_std=y_std,
+            batch_size=batch_size,
+            target_names=target_names,
+            run_dir=run_dir,
+            condition=target_condition,
+            window_size=window_size,
+        )
 
 
 if __name__ == "__main__":
