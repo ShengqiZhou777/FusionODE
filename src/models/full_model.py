@@ -28,6 +28,8 @@ class FusionGRUModel(nn.Module):
         use_morph: bool = True,
         use_cnn: bool = True,
         fusion_type: str = "cross_attention",
+        attn_dim: int = 64,
+        attn_heads: int = 4,
     ):
         super().__init__()
         if not use_morph and not use_cnn:
@@ -43,8 +45,8 @@ class FusionGRUModel(nn.Module):
                 morph_dim=z_morph,
                 cnn_dim=z_cnn,
                 out_dim=fusion_dim,
-                attn_dim=64,
-                num_heads=4,
+                attn_dim=attn_dim,
+                num_heads=attn_heads,
                 attn_dropout=dropout,
                 proj_dropout=dropout,
             )
@@ -118,6 +120,8 @@ class FusionLSTMModel(nn.Module):
         use_morph: bool = True,
         use_cnn: bool = True,
         fusion_type: str = "cross_attention",
+        attn_dim: int = 64,
+        attn_heads: int = 4,
     ):
         super().__init__()
         if not use_morph and not use_cnn:
@@ -133,8 +137,8 @@ class FusionLSTMModel(nn.Module):
                 morph_dim=z_morph,
                 cnn_dim=z_cnn,
                 out_dim=fusion_dim,
-                attn_dim=64,
-                num_heads=4,
+                attn_dim=attn_dim,
+                num_heads=attn_heads,
                 attn_dropout=dropout,
                 proj_dropout=dropout,
             )
@@ -193,6 +197,8 @@ class FusionODERNNModel(nn.Module):
         use_morph: bool = True,
         use_cnn: bool = True,
         fusion_type: str = "cross_attention",
+        attn_dim: int = 64,
+        attn_heads: int = 4,
     ):
         super().__init__()
         if not use_morph and not use_cnn:
@@ -208,8 +214,8 @@ class FusionODERNNModel(nn.Module):
                 morph_dim=z_morph,
                 cnn_dim=z_cnn,
                 out_dim=fusion_dim,
-                attn_dim=64,
-                num_heads=4,
+                attn_dim=attn_dim,
+                num_heads=attn_heads,
                 attn_dropout=dropout,
                 proj_dropout=dropout,
             )

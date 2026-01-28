@@ -74,6 +74,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lr", type=float, default=1e-2)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--n-cells-per-bag", type=int, default=500)
+    parser.add_argument("--rnn-hidden", type=int, default=128)
+    parser.add_argument("--rnn-layers", type=int, default=1)
+    parser.add_argument("--hidden-dim", type=int, default=128)
+    parser.add_argument("--ode-hidden", type=int, default=128)
+    parser.add_argument("--attn-dim", type=int, default=64)
+    parser.add_argument("--attn-heads", type=int, default=4)
     parser.add_argument("--run-name", default=None)
     return parser.parse_args()
 
@@ -210,12 +216,14 @@ def main() -> None:
             cnn_dim=Dc,
             z_morph=64,
             z_cnn=64,
-            hidden_dim=128,
-            ode_hidden=128,
+            hidden_dim=args.hidden_dim,
+            ode_hidden=args.ode_hidden,
             dropout=0.1,
             use_morph=use_morph,
             use_cnn=use_cnn,
             fusion_type=fusion_type,
+            attn_dim=args.attn_dim,
+            attn_heads=args.attn_heads,
         ).to(device)
     elif model_type == "gru":
         model = FusionGRUModel(
@@ -223,12 +231,14 @@ def main() -> None:
             cnn_dim=Dc,
             z_morph=64,
             z_cnn=64,
-            rnn_hidden=128,
-            rnn_layers=1,
+            rnn_hidden=args.rnn_hidden,
+            rnn_layers=args.rnn_layers,
             dropout=0.1,
             use_morph=use_morph,
             use_cnn=use_cnn,
             fusion_type=fusion_type,
+            attn_dim=args.attn_dim,
+            attn_heads=args.attn_heads,
         ).to(device)
     elif model_type == "lstm":
         model = FusionLSTMModel(
@@ -236,12 +246,14 @@ def main() -> None:
             cnn_dim=Dc,
             z_morph=64,
             z_cnn=64,
-            rnn_hidden=128,
-            rnn_layers=1,
+            rnn_hidden=args.rnn_hidden,
+            rnn_layers=args.rnn_layers,
             dropout=0.1,
             use_morph=use_morph,
             use_cnn=use_cnn,
             fusion_type=fusion_type,
+            attn_dim=args.attn_dim,
+            attn_heads=args.attn_heads,
         ).to(device)
     else:
         raise ValueError(f"Unsupported model_type: {model_type}")
@@ -255,8 +267,6 @@ def main() -> None:
 
     # ---- train loop ----
     ckpt_path = os.path.join(run_dir, f"best_ode_{target_condition}.pt")
-
-    target_names = ["Dry_Weight", "Chl_Per_Cell", "Fv_Fm", "Oxygen_Rate"]
 
     target_names = ["Dry_Weight", "Chl_Per_Cell", "Fv_Fm", "Oxygen_Rate"]
 
