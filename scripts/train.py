@@ -173,14 +173,19 @@ def main():
                 ckpt_path,
             )
             # 只有在 improve 的时候打印详细指标，避免刷屏
-            print(f"  [New Best] val_rmse: t0={va['rmse_raw_t0']:.4f}, t1={va['rmse_raw_t1']:.4f}, t2={va['rmse_raw_t2']:.4f}, t3={va['rmse_raw_t3']:.4f}")
+            print(
+                "  [New Best] "
+                f"val_rmse: t0={va['rmse_raw_t0']:.4f}, t1={va['rmse_raw_t1']:.4f}, "
+                f"t2={va['rmse_raw_t2']:.4f}, t3={va['rmse_raw_t3']:.4f} | "
+                f"val_r2_mean={va['r2_mean']:.4f}"
+            )
         else:
             bad_epochs += 1
 
         print(
             f"Epoch {ep:03d} | "
             f"train_mse_norm={tr['mse_norm']:.6f} train_mse_raw={tr['mse_raw']:.6f} | "
-            f"val_mse_norm={va['mse_norm']:.6f} val_mse_raw={va['mse_raw']:.6f} | "
+            f"val_mse_norm={va['mse_norm']:.6f} val_mse_raw={va['mse_raw']:.6f} val_r2_mean={va['r2_mean']:.4f} | "
             f"best_val_raw={best_val_raw:.6f} best_val_norm={best_val_norm:.6f} | "
             f"bad_epochs={bad_epochs}/{patience}"
         )
@@ -211,8 +216,21 @@ def main():
         
         # Evaluate
         test_metrics = eval_one_epoch(model, dl_test, device, y_mean=y_mean, y_std=y_std)
-        print(f"[Test Result] mse_raw={test_metrics['mse_raw']:.6f} | mse_norm={test_metrics['mse_norm']:.6f}")
-        print(f"[Test RMSE] t0={test_metrics['rmse_raw_t0']:.4f}, t1={test_metrics['rmse_raw_t1']:.4f}, t2={test_metrics['rmse_raw_t2']:.4f}, t3={test_metrics['rmse_raw_t3']:.4f}")
+        print(
+            f"[Test Result] mse_raw={test_metrics['mse_raw']:.6f} | "
+            f"mse_norm={test_metrics['mse_norm']:.6f} | "
+            f"r2_mean={test_metrics['r2_mean']:.4f}"
+        )
+        print(
+            "[Test RMSE] "
+            f"t0={test_metrics['rmse_raw_t0']:.4f}, t1={test_metrics['rmse_raw_t1']:.4f}, "
+            f"t2={test_metrics['rmse_raw_t2']:.4f}, t3={test_metrics['rmse_raw_t3']:.4f}"
+        )
+        print(
+            "[Test R2] "
+            f"t0={test_metrics['r2_t0']:.4f}, t1={test_metrics['r2_t1']:.4f}, "
+            f"t2={test_metrics['r2_t2']:.4f}, t3={test_metrics['r2_t3']:.4f}"
+        )
     else:
         print("[Test] No test data available (ds_test is empty).")
 

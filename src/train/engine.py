@@ -124,6 +124,10 @@ def eval_one_epoch(
 
     mae = (YH - Y).abs().mean(dim=0)                 # [4]
     rmse = torch.sqrt(((YH - Y) ** 2).mean(dim=0))   # [4]
+    ss_res = ((YH - Y) ** 2).sum(dim=0)
+    y_mean = Y.mean(dim=0)
+    ss_tot = ((Y - y_mean) ** 2).sum(dim=0)
+    r2 = 1.0 - (ss_res / (ss_tot + 1e-12))
 
     mse_raw = float(sum(mse_raw_list) / max(len(mse_raw_list), 1))
     if use_norm:
@@ -142,6 +146,11 @@ def eval_one_epoch(
         "rmse_raw_t1": float(rmse[1]),
         "rmse_raw_t2": float(rmse[2]),
         "rmse_raw_t3": float(rmse[3]),
+        "r2_t0": float(r2[0]),
+        "r2_t1": float(r2[1]),
+        "r2_t2": float(r2[2]),
+        "r2_t3": float(r2[3]),
+        "r2_mean": float(r2.mean()),
     }
     return out
 
