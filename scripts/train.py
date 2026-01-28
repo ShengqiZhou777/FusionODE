@@ -1,6 +1,7 @@
 from __future__ import annotations
 import os
 import random
+import csv
 import numpy as np
 import torch
 import sys
@@ -55,6 +56,8 @@ def main():
     lr = 1e-2
     weight_decay = 1e-4
     epochs = 200
+    mc_test_runs = 1
+    mc_test_base_seed = 1000
 
     # condition to train on
     target_condition = "Light"
@@ -79,6 +82,8 @@ def main():
         n_cells_per_bag=n_cells_per_bag,
         split_ratios=(0.7, 0.15, 0.15),
         seed=0,
+        split_seed=0,
+        bag_seed=0,
         sample_with_replacement=True,
     )
 
@@ -203,34 +208,98 @@ def main():
     if len(ds_test) > 0:
         checkpoint = torch.load(ckpt_path, map_location=device)
         model.load_state_dict(checkpoint["model"])
-        
-        # Test Loader
-        dl_test = DataLoader(
-            ds_test,
-            batch_size=batch_size,
-            shuffle=False,
-            num_workers=0,
-            collate_fn=collate_windows,
-            generator=g,
-        )
-        
-        # Evaluate
-        test_metrics = eval_one_epoch(model, dl_test, device, y_mean=y_mean, y_std=y_std)
-        print(
-            f"[Test Result] mse_raw={test_metrics['mse_raw']:.6f} | "
-            f"mse_norm={test_metrics['mse_norm']:.6f} | "
-            f"r2_mean={test_metrics['r2_mean']:.4f}"
-        )
-        print(
-            "[Test RMSE] "
-            f"t0={test_metrics['rmse_raw_t0']:.4f}, t1={test_metrics['rmse_raw_t1']:.4f}, "
-            f"t2={test_metrics['rmse_raw_t2']:.4f}, t3={test_metrics['rmse_raw_t3']:.4f}"
-        )
-        print(
-            "[Test R2] "
-            f"t0={test_metrics['r2_t0']:.4f}, t1={test_metrics['r2_t1']:.4f}, "
-            f"t2={test_metrics['r2_t2']:.4f}, t3={test_metrics['r2_t3']:.4f}"
-        )
+
+        if mc_test_runs <= 1:
+            dl_test = DataLoader(
+                ds_test,
+                batch_size=batch_size,
+                shuffle=False,
+                num_workers=0,
+                collate_fn=collate_windows,
+                generator=g,
+            )
+            test_metrics = eval_one_epoch(model, dl_test, device, y_mean=y_mean, y_std=y_std)
+            print(
+                f"[Test Result] mse_raw={test_metrics['mse_raw']:.6f} | "
+                f"mse_norm={test_metrics['mse_norm']:.6f} | "
+                f"r2_mean={test_metrics['r2_mean']:.4f}"
+            )
+            print(
+                "[Test RMSE] "
+                f"t0={test_metrics['rmse_raw_t0']:.4f}, t1={test_metrics['rmse_raw_t1']:.4f}, "
+                f"t2={test_metrics['rmse_raw_t2']:.4f}, t3={test_metrics['rmse_raw_t3']:.4f}"
+            )
+            print(
+                "[Test R2] "
+                f"t0={test_metrics['r2_t0']:.4f}, t1={test_metrics['r2_t1']:.4f}, "
+                f"t2={test_metrics['r2_t2']:.4f}, t3={test_metrics['r2_t3']:.4f}"
+            )
+        else:
+            metrics_list = []
+            for run_idx in range(mc_test_runs):
+                traj_train_mc, traj_val_mc, traj_test_mc = build_trajectories(
+                    df_cnn, df_morph, df_tgt,
+                    n_cells_per_bag=n_cells_per_bag,
+                    split_ratios=(0.7, 0.15, 0.15),
+                    seed=0,
+                    split_seed=0,
+                    bag_seed=mc_test_base_seed + run_idx,
+                    sample_with_replacement=True,
+                )
+                traj_test_mc = {k: v for k, v in traj_test_mc.items() if k == target_condition}
+                ds_test_mc = SlidingWindowDataset(traj_test_mc, window_size=window_size, predict_last=predict_last)
+                dl_test_mc = DataLoader(
+                    ds_test_mc,
+                    batch_size=batch_size,
+                    shuffle=False,
+                    num_workers=0,
+                    collate_fn=collate_windows,
+                    generator=g,
+                )
+                metrics = eval_one_epoch(model, dl_test_mc, device, y_mean=y_mean, y_std=y_std)
+                metrics_list.append(metrics)
+
+            def _mean_std(key: str) -> tuple[float, float]:
+                vals = np.array([m[key] for m in metrics_list], dtype=np.float64)
+                return float(vals.mean()), float(vals.std(ddof=0))
+
+            mean_mse_raw, std_mse_raw = _mean_std("mse_raw")
+            mean_mse_norm, std_mse_norm = _mean_std("mse_norm")
+            mean_r2, std_r2 = _mean_std("r2_mean")
+            mean_rmse_t0, std_rmse_t0 = _mean_std("rmse_raw_t0")
+            mean_rmse_t1, std_rmse_t1 = _mean_std("rmse_raw_t1")
+            mean_rmse_t2, std_rmse_t2 = _mean_std("rmse_raw_t2")
+            mean_rmse_t3, std_rmse_t3 = _mean_std("rmse_raw_t3")
+
+            print(f"[MC Test] runs={mc_test_runs}")
+            print(
+                f"[MC Result] mse_raw={mean_mse_raw:.6f}±{std_mse_raw:.6f} | "
+                f"mse_norm={mean_mse_norm:.6f}±{std_mse_norm:.6f} | "
+                f"r2_mean={mean_r2:.4f}±{std_r2:.4f}"
+            )
+            print(
+                "[MC RMSE] "
+                f"t0={mean_rmse_t0:.4f}±{std_rmse_t0:.4f}, "
+                f"t1={mean_rmse_t1:.4f}±{std_rmse_t1:.4f}, "
+                f"t2={mean_rmse_t2:.4f}±{std_rmse_t2:.4f}, "
+                f"t3={mean_rmse_t3:.4f}±{std_rmse_t3:.4f}"
+            )
+
+            os.makedirs(os.path.join(root, "runs"), exist_ok=True)
+            mc_path = os.path.join(
+                root,
+                "runs",
+                f"mc_test_{target_condition}_w{window_size}_k{mc_test_runs}.csv",
+            )
+            fieldnames = sorted(metrics_list[0].keys())
+            with open(mc_path, "w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=["run"] + fieldnames)
+                writer.writeheader()
+                for i, m in enumerate(metrics_list):
+                    row = {"run": i}
+                    row.update(m)
+                    writer.writerow(row)
+            print(f"[MC Saved] {mc_path}")
     else:
         print("[Test] No test data available (ds_test is empty).")
 

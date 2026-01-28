@@ -59,11 +59,15 @@ def build_trajectories(
     n_cells_per_bag: int = 500,
     split_ratios: tuple[float, float, float] = (0.7, 0.15, 0.15),
     seed: int = 0,
+    split_seed: int | None = None,
+    bag_seed: int | None = None,
     sample_with_replacement: bool = True,
 ) -> tuple[dict, dict, dict]:
     """
     params:
       n_cells_per_bag: 每个时间点最多采样的细胞数 (Bag Size).
+      split_seed: 控制 cell split 的随机种子（不设则回退到 seed）
+      bag_seed: 控制 bag 采样的随机种子（不设则回退到 seed）
     returns: (traj_train, traj_val, traj_test)
     """
     # --- 找列 ---
@@ -80,6 +84,11 @@ def build_trajectories(
     for c in target_cols:
         if c not in df_target.columns:
             raise ValueError(f"result.csv 缺少 target 列: {c}")
+
+    if split_seed is None:
+        split_seed = seed
+    if bag_seed is None:
+        bag_seed = seed
 
     # --- groupby ---
     cnn_groups = {(cond, t): g for (cond, t), g in df_cnn.groupby(["condition", "time"], dropna=True)}
@@ -115,7 +124,7 @@ def build_trajectories(
             if len(common_cells) == 0:
                 continue
 
-            rng_split = _stable_rng(seed, c, t, "split")
+            rng_split = _stable_rng(split_seed, c, t, "split")
             rng_split.shuffle(common_cells)
 
             # Split cells
@@ -146,7 +155,7 @@ def build_trajectories(
                 if n_current == 0:
                     continue
 
-                rng_sample = _stable_rng(seed, c, t, split_name)
+                rng_sample = _stable_rng(bag_seed, c, t, split_name)
                 if n_current >= n_cells_per_bag:
                     kept_ids = rng_sample.choice(available_ids, size=n_cells_per_bag, replace=False)
                 else:
