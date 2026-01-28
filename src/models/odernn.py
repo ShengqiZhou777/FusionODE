@@ -6,16 +6,22 @@ import torch.nn as nn
 from src.models.ode_func import ODEFunc
 
 
-def rk4_step(h: torch.Tensor, dt: torch.Tensor, f) -> torch.Tensor:
-    """One RK4 step for dh/dt=f(h). dt: [B,1]"""
-    k1 = f(h)
-    k2 = f(h + 0.5 * dt * k1)
-    k3 = f(h + 0.5 * dt * k2)
-    k4 = f(h + dt * k3)
+def rk4_step(h: torch.Tensor, dt: torch.Tensor, f, control: torch.Tensor | None = None) -> torch.Tensor:
+    """One RK4 step for dh/dt=f(h[, control]). dt: [B,1]"""
+    k1 = f(h, control)
+    k2 = f(h + 0.5 * dt * k1, control)
+    k3 = f(h + 0.5 * dt * k2, control)
+    k4 = f(h + dt * k3, control)
     return h + (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
 
 
-def rk4_integrate(h: torch.Tensor, dt: torch.Tensor, f, dt_max: float = 0.05) -> torch.Tensor:
+def rk4_integrate(
+    h: torch.Tensor,
+    dt: torch.Tensor,
+    f,
+    control: torch.Tensor | None = None,
+    dt_max: float = 0.05,
+) -> torch.Tensor:
     """
     Integrate with multiple RK4 sub-steps so that each sub-step <= dt_max.
     dt: [B] (already normalized time scale, e.g., hours/72)
@@ -34,7 +40,7 @@ def rk4_integrate(h: torch.Tensor, dt: torch.Tensor, f, dt_max: float = 0.05) ->
         active = (n_steps > s).unsqueeze(-1)  # [B,1] bool
         if not active.any():
             break
-        h_new = rk4_step(h, dt_sub, f)
+        h_new = rk4_step(h, dt_sub, f, control=control)
         # only update active samples
         h = torch.where(active, h_new, h)
 
@@ -49,12 +55,24 @@ class ODERNN(nn.Module):
         ode_hidden: int = 128,
         dropout: float = 0.0,
         dt_max: float = 0.05,   # <=0.05 works well when time normalized to [0,1]
+        use_control: bool = True,
+        use_residual_gate: bool = True,
+        residual_init: float = -2.0,
     ):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.dt_max = dt_max
-        self.func = ODEFunc(hidden_dim=hidden_dim, ode_hidden=ode_hidden, dropout=dropout)
+        self.use_control = use_control
+        self.use_residual_gate = use_residual_gate
+        control_dim = input_dim if use_control else 0
+        self.func = ODEFunc(
+            hidden_dim=hidden_dim,
+            ode_hidden=ode_hidden,
+            dropout=dropout,
+            control_dim=control_dim,
+        )
         self.gru = nn.GRUCell(input_dim, hidden_dim)
+        self.residual_gate = nn.Parameter(torch.tensor(residual_init)) if use_residual_gate else None
 
     def forward(self, x: torch.Tensor, times: torch.Tensor) -> torch.Tensor:
         B, W, Dx = x.shape
@@ -64,7 +82,16 @@ class ODERNN(nn.Module):
             if i > 0:
                 dt = times[:, i] - times[:, i - 1]  # [B]
                 dt = torch.clamp(dt, min=0.0)
-                h = rk4_integrate(h, dt, self.func, dt_max=self.dt_max)
-            h = self.gru(x[:, i, :], h)
+                control = x[:, i - 1, :] if self.use_control else None
+                h_ode = rk4_integrate(h, dt, self.func, control=control, dt_max=self.dt_max)
+            else:
+                h_ode = h
+
+            h_gru = self.gru(x[:, i, :], h_ode)
+            if self.use_residual_gate:
+                alpha = torch.sigmoid(self.residual_gate)
+                h = alpha * h_gru + (1.0 - alpha) * h_ode
+            else:
+                h = h_gru
 
         return h

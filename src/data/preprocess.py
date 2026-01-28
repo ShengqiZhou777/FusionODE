@@ -1,8 +1,55 @@
 # src/data/preprocess.py
 from __future__ import annotations
+import hashlib
 import numpy as np
 import pandas as pd
 import torch
+
+
+def _stable_rng(seed: int, *parts: object) -> np.random.Generator:
+    """
+    Create a deterministic RNG from a base seed and arbitrary parts.
+    This avoids Python's randomized hash across runs.
+    """
+    h = hashlib.sha256()
+    h.update(str(seed).encode("utf-8"))
+    for p in parts:
+        h.update(str(p).encode("utf-8"))
+    seed_int = int(h.hexdigest()[:16], 16) % (2**32)
+    return np.random.default_rng(seed_int)
+
+
+def _safe_morph_stats(mg: np.ndarray, eps: float = 1e-8) -> np.ndarray:
+    """
+    Compute mean/std/median/skew/kurtosis with numerical safeguards.
+    mg: [N, D]
+    returns: [5*D] concatenated stats
+    """
+    if mg.size == 0:
+        raise ValueError("Empty morph array after filtering; cannot compute stats.")
+
+    mg = np.asarray(mg, dtype=np.float32)
+    mu = np.nanmean(mg, axis=0)
+    md = np.nanmedian(mg, axis=0)
+
+    centered = mg - mu
+    m2 = np.nanmean(centered ** 2, axis=0)
+    sd = np.sqrt(np.maximum(m2, eps))
+    m3 = np.nanmean(centered ** 3, axis=0)
+    m4 = np.nanmean(centered ** 4, axis=0)
+
+    skew = m3 / (m2 ** 1.5 + eps)
+    kurt = m4 / (m2 ** 2 + eps) - 3.0  # excess kurtosis (pandas default)
+
+    stats = np.concatenate([mu, sd, md, skew, kurt], axis=0)
+    stats = np.nan_to_num(stats, nan=0.0, posinf=0.0, neginf=0.0)
+    return stats
+
+
+def _resolve_common_cell_ids(df_m: pd.DataFrame, df_c: pd.DataFrame) -> np.ndarray:
+    morph_ids = df_m["cell_id"].unique()
+    cnn_ids = df_c["cell_id"].unique()
+    return np.intersect1d(morph_ids, cnn_ids, assume_unique=False)
 
 
 def build_trajectories(
@@ -12,14 +59,13 @@ def build_trajectories(
     n_cells_per_bag: int = 500,
     split_ratios: tuple[float, float, float] = (0.7, 0.15, 0.15),
     seed: int = 0,
+    sample_with_replacement: bool = True,
 ) -> tuple[dict, dict, dict]:
     """
     params:
       n_cells_per_bag: 每个时间点最多采样的细胞数 (Bag Size).
     returns: (traj_train, traj_val, traj_test)
     """
-    rng = np.random.default_rng(seed)
-
     # --- 找列 ---
     cnn_feat_cols = [c for c in df_cnn.columns if c.startswith("cnn_pca_")]
     if len(cnn_feat_cols) == 0:
@@ -38,6 +84,9 @@ def build_trajectories(
     # --- groupby ---
     cnn_groups = {(cond, t): g for (cond, t), g in df_cnn.groupby(["condition", "time"], dropna=True)}
     morph_groups = {(cond, t): g for (cond, t), g in df_morph.groupby(["condition", "time"], dropna=True)}
+    if df_target.duplicated(subset=["condition", "time"]).any():
+        dup = df_target[df_target.duplicated(subset=["condition", "time"], keep=False)]
+        raise ValueError(f"result.csv 存在重复 condition/time:\n{dup[['condition','time']].head()}")
     tgt_groups = {(r["condition"], float(r["time"])): r for _, r in df_target.iterrows()}
 
     keys = sorted(set(cnn_groups) & set(morph_groups) & set(tgt_groups))
@@ -60,18 +109,24 @@ def build_trajectories(
 
         for (c, t) in cond_keys:
             df_m = morph_groups[(c, t)]
-            all_cells = df_m["cell_id"].unique()
-            rng.shuffle(all_cells)
+            df_c = cnn_groups[(c, t)]
+
+            common_cells = _resolve_common_cell_ids(df_m, df_c)
+            if len(common_cells) == 0:
+                continue
+
+            rng_split = _stable_rng(seed, c, t, "split")
+            rng_split.shuffle(common_cells)
 
             # Split cells
-            n_total = len(all_cells)
+            n_total = len(common_cells)
             n_train = int(n_total * split_ratios[0])
             n_val = int(n_total * split_ratios[1])
             # n_test = rest
 
-            train_cells = set(all_cells[:n_train])
-            val_cells = set(all_cells[n_train : n_train + n_val])
-            test_cells = set(all_cells[n_train + n_val :])
+            train_cells = set(common_cells[:n_train])
+            val_cells = set(common_cells[n_train : n_train + n_val])
+            test_cells = set(common_cells[n_train + n_val :])
 
             for split_name, cell_set in [("train", train_cells), ("val", val_cells), ("test", test_cells)]:
                 if len(cell_set) == 0:
@@ -79,31 +134,34 @@ def build_trajectories(
 
                 # Filter to current split
                 df_m_sub = df_m[df_m["cell_id"].isin(cell_set)]
-                # Note: df_c_sub filtering deferred to be synced with df_m_sub
+                df_c_sub = df_c[df_c["cell_id"].isin(cell_set)]
 
                 # Subsample cell_ids if needed (shared between Morph and CNN)
-                available_ids = df_m_sub["cell_id"].to_numpy()
+                available_ids = np.intersect1d(
+                    df_m_sub["cell_id"].to_numpy(),
+                    df_c_sub["cell_id"].to_numpy(),
+                    assume_unique=False,
+                )
                 n_current = len(available_ids)
-                
-                if n_current > n_cells_per_bag:
-                    # Randomly select cell_ids
-                    kept_ids = rng.choice(available_ids, size=n_cells_per_bag, replace=False)
+                if n_current == 0:
+                    continue
+
+                rng_sample = _stable_rng(seed, c, t, split_name)
+                if n_current >= n_cells_per_bag:
+                    kept_ids = rng_sample.choice(available_ids, size=n_cells_per_bag, replace=False)
                 else:
-                    kept_ids = available_ids
+                    if sample_with_replacement:
+                        kept_ids = rng_sample.choice(available_ids, size=n_cells_per_bag, replace=True)
+                    else:
+                        kept_ids = available_ids
                 
-                # Apply selection to both
-                df_m_sub = df_m_sub[df_m_sub["cell_id"].isin(kept_ids)]
-                df_c_sub = cnn_groups[(c, t)]
-                df_c_sub = df_c_sub[df_c_sub["cell_id"].isin(kept_ids)]
+                # Apply selection to both (preserve duplicates if sampled with replacement)
+                df_m_sub = df_m_sub.set_index("cell_id").loc[kept_ids].reset_index()
+                df_c_sub = df_c_sub.set_index("cell_id").loc[kept_ids].reset_index()
 
                 # Morph
-                mg = df_m_sub[morph_feat_cols].astype(float)
-                mu = mg.mean(axis=0).to_numpy()
-                sd = mg.std(axis=0, ddof=0).to_numpy()
-                md = mg.median(axis=0).to_numpy()
-                sk = mg.skew(axis=0).fillna(0.0).to_numpy()
-                ku = mg.kurtosis(axis=0).fillna(0.0).to_numpy()
-                morph_vec = np.concatenate([mu, sd, md, sk, ku], axis=0)
+                mg = df_m_sub[morph_feat_cols].astype(float).to_numpy()
+                morph_vec = _safe_morph_stats(mg)
 
                 # CNN bags
                 cg = df_c_sub[cnn_feat_cols].astype(float).to_numpy()
@@ -136,4 +194,3 @@ def build_trajectories(
                 }
 
     return traj_train, traj_val, traj_test
-
