@@ -206,9 +206,18 @@ def main():
     os.makedirs(os.path.join(root, "runs"), exist_ok=True)
     ckpt_path = os.path.join(root, "runs", f"best_ode_{target_condition}.pt")
 
+    target_names = ["Dry_Weight", "Chl_Per_Cell", "Fv_Fm", "Oxygen_Rate"]
+
     for ep in range(epochs):
         tr = train_one_epoch(model, dl_train, optimizer, device, y_mean=y_mean, y_std=y_std, grad_clip=grad_clip)
-        va = eval_one_epoch(model, dl_val, device, y_mean=y_mean, y_std=y_std)
+        va = eval_one_epoch(
+            model,
+            dl_val,
+            device,
+            y_mean=y_mean,
+            y_std=y_std,
+            target_names=target_names,
+        )
 
         # Scheduler step
         if use_scheduler:
@@ -228,8 +237,10 @@ def main():
             # 只有在 improve 的时候打印详细指标，避免刷屏
             print(
                 "  [New Best] "
-                f"RMSE: t0={va['rmse_raw_t0']:.3f}, t1={va['rmse_raw_t1']:.3f}, "
-                f"t2={va['rmse_raw_t2']:.3f}, t3={va['rmse_raw_t3']:.3f}"
+                f"RMSE: Dry_Weight={va['rmse_raw_Dry_Weight']:.3f}, "
+                f"Chl_Per_Cell={va['rmse_raw_Chl_Per_Cell']:.3f}, "
+                f"Fv_Fm={va['rmse_raw_Fv_Fm']:.3f}, "
+                f"Oxygen_Rate={va['rmse_raw_Oxygen_Rate']:.3f}"
             )
         else:
             bad_epochs += 1
@@ -264,20 +275,31 @@ def main():
                 collate_fn=collate_windows,
                 generator=g,
             )
-            test_metrics = eval_one_epoch(model, dl_test, device, y_mean=y_mean, y_std=y_std)
+            test_metrics = eval_one_epoch(
+                model,
+                dl_test,
+                device,
+                y_mean=y_mean,
+                y_std=y_std,
+                target_names=target_names,
+            )
             print(
                 f"[Test Result] mse_raw={test_metrics['mse_raw']:.6f} | "
                 f"mse_norm={test_metrics['mse_norm']:.6f}"
             )
             print(
                 "[Test RMSE] "
-                f"t0={test_metrics['rmse_raw_t0']:.4f}, t1={test_metrics['rmse_raw_t1']:.4f}, "
-                f"t2={test_metrics['rmse_raw_t2']:.4f}, t3={test_metrics['rmse_raw_t3']:.4f}"
+                f"Dry_Weight={test_metrics['rmse_raw_Dry_Weight']:.4f}, "
+                f"Chl_Per_Cell={test_metrics['rmse_raw_Chl_Per_Cell']:.4f}, "
+                f"Fv_Fm={test_metrics['rmse_raw_Fv_Fm']:.4f}, "
+                f"Oxygen_Rate={test_metrics['rmse_raw_Oxygen_Rate']:.4f}"
             )
             print(
                 "[Test R2] "
-                f"t0={test_metrics['r2_t0']:.4f}, t1={test_metrics['r2_t1']:.4f}, "
-                f"t2={test_metrics['r2_t2']:.4f}, t3={test_metrics['r2_t3']:.4f}"
+                f"Dry_Weight={test_metrics['r2_Dry_Weight']:.4f}, "
+                f"Chl_Per_Cell={test_metrics['r2_Chl_Per_Cell']:.4f}, "
+                f"Fv_Fm={test_metrics['r2_Fv_Fm']:.4f}, "
+                f"Oxygen_Rate={test_metrics['r2_Oxygen_Rate']:.4f}"
             )
         else:
             metrics_list = []
@@ -307,7 +329,15 @@ def main():
                     collate_fn=collate_windows,
                     generator=g,
                 )
-                metrics, Y_true, Y_pred = eval_one_epoch(model, dl_test_mc, device, y_mean=y_mean, y_std=y_std, return_preds=True)
+                metrics, Y_true, Y_pred = eval_one_epoch(
+                    model,
+                    dl_test_mc,
+                    device,
+                    y_mean=y_mean,
+                    y_std=y_std,
+                    return_preds=True,
+                    target_names=target_names,
+                )
                 metrics_list.append(metrics)
 
                 # Collect predictions
@@ -333,15 +363,15 @@ def main():
             mean_mse_raw, std_mse_raw = _mean_std("mse_raw")
             mean_mse_norm, std_mse_norm = _mean_std("mse_norm")
             
-            mean_rmse_t0, std_rmse_t0 = _mean_std("rmse_raw_t0")
-            mean_rmse_t1, std_rmse_t1 = _mean_std("rmse_raw_t1")
-            mean_rmse_t2, std_rmse_t2 = _mean_std("rmse_raw_t2")
-            mean_rmse_t3, std_rmse_t3 = _mean_std("rmse_raw_t3")
+            mean_rmse_t0, std_rmse_t0 = _mean_std("rmse_raw_Dry_Weight")
+            mean_rmse_t1, std_rmse_t1 = _mean_std("rmse_raw_Chl_Per_Cell")
+            mean_rmse_t2, std_rmse_t2 = _mean_std("rmse_raw_Fv_Fm")
+            mean_rmse_t3, std_rmse_t3 = _mean_std("rmse_raw_Oxygen_Rate")
 
-            mean_r2_t0, std_r2_t0 = _mean_std("r2_t0")
-            mean_r2_t1, std_r2_t1 = _mean_std("r2_t1")
-            mean_r2_t2, std_r2_t2 = _mean_std("r2_t2")
-            mean_r2_t3, std_r2_t3 = _mean_std("r2_t3")
+            mean_r2_t0, std_r2_t0 = _mean_std("r2_Dry_Weight")
+            mean_r2_t1, std_r2_t1 = _mean_std("r2_Chl_Per_Cell")
+            mean_r2_t2, std_r2_t2 = _mean_std("r2_Fv_Fm")
+            mean_r2_t3, std_r2_t3 = _mean_std("r2_Oxygen_Rate")
 
             print(f"[MC Test] runs={mc_test_runs}")
             print(
@@ -350,17 +380,17 @@ def main():
             )
             print(
                 "[MC RMSE] "
-                f"t0={mean_rmse_t0:.4f}±{std_rmse_t0:.4f}, "
-                f"t1={mean_rmse_t1:.4f}±{std_rmse_t1:.4f}, "
-                f"t2={mean_rmse_t2:.4f}±{std_rmse_t2:.4f}, "
-                f"t3={mean_rmse_t3:.4f}±{std_rmse_t3:.4f}"
+                f"Dry_Weight={mean_rmse_t0:.4f}±{std_rmse_t0:.4f}, "
+                f"Chl_Per_Cell={mean_rmse_t1:.4f}±{std_rmse_t1:.4f}, "
+                f"Fv_Fm={mean_rmse_t2:.4f}±{std_rmse_t2:.4f}, "
+                f"Oxygen_Rate={mean_rmse_t3:.4f}±{std_rmse_t3:.4f}"
             )
             print(
                 "[MC R2] "
-                f"t0={mean_r2_t0:.4f}±{std_r2_t0:.4f}, "
-                f"t1={mean_r2_t1:.4f}±{std_r2_t1:.4f}, "
-                f"t2={mean_r2_t2:.4f}±{std_r2_t2:.4f}, "
-                f"t3={mean_r2_t3:.4f}±{std_r2_t3:.4f}"
+                f"Dry_Weight={mean_r2_t0:.4f}±{std_r2_t0:.4f}, "
+                f"Chl_Per_Cell={mean_r2_t1:.4f}±{std_r2_t1:.4f}, "
+                f"Fv_Fm={mean_r2_t2:.4f}±{std_r2_t2:.4f}, "
+                f"Oxygen_Rate={mean_r2_t3:.4f}±{std_r2_t3:.4f}"
             )
 
             os.makedirs(os.path.join(root, "runs"), exist_ok=True)
