@@ -5,6 +5,7 @@ import torch.nn as nn
 
 from src.models.encoders import MorphMLP, AttentionMIL
 from src.models.decoder import RegressionHead
+from src.models.fusion import CrossAttentionFusion
 
 
 class FusionGRUModel(nn.Module):
@@ -30,6 +31,15 @@ class FusionGRUModel(nn.Module):
         self.cnn_encoder = AttentionMIL(in_dim=cnn_dim, out_dim=z_cnn, attn_hidden=128, gated=True)
 
         fusion_dim = z_morph + z_cnn
+        self.fusion = CrossAttentionFusion(
+            morph_dim=z_morph,
+            cnn_dim=z_cnn,
+            out_dim=fusion_dim,
+            attn_dim=64,
+            num_heads=4,
+            attn_dropout=dropout,
+            proj_dropout=dropout,
+        )
 
         # batch_first=True => input [B,W,F]
         self.gru = nn.GRU(
@@ -55,7 +65,7 @@ class FusionGRUModel(nn.Module):
 
         z_m = self.morph_encoder(morph)           # [B,W,Zm]
         z_c = self.cnn_encoder(bags, mask)        # [B,W,Zc]
-        x = torch.cat([z_m, z_c], dim=-1)         # [B,W,Z]
+        x = self.fusion(z_m, z_c)                 # [B,W,Z]
 
         h_seq, h_last = self.gru(x)               # h_last: [layers, B, H]
         h = h_last[-1]                            # [B,H] last layer
@@ -87,6 +97,15 @@ class FusionODERNNModel(nn.Module):
         self.cnn_encoder = AttentionMIL(in_dim=cnn_dim, out_dim=z_cnn, attn_hidden=128, gated=True)
 
         fusion_dim = z_morph + z_cnn
+        self.fusion = CrossAttentionFusion(
+            morph_dim=z_morph,
+            cnn_dim=z_cnn,
+            out_dim=fusion_dim,
+            attn_dim=64,
+            num_heads=4,
+            attn_dropout=dropout,
+            proj_dropout=dropout,
+        )
         self.temporal = ODERNN(
             input_dim=fusion_dim,
             hidden_dim=hidden_dim,
@@ -102,7 +121,7 @@ class FusionODERNNModel(nn.Module):
         times = batch["times"] / 72.0       # [B,W]
         z_m = self.morph_encoder(morph)        # [B,W,Zm]
         z_c = self.cnn_encoder(bags, mask)     # [B,W,Zc]
-        x = torch.cat([z_m, z_c], dim=-1)      # [B,W,F]
+        x = self.fusion(z_m, z_c)             # [B,W,F]
 
         h_last = self.temporal(x, times)       # [B,H]
         y_hat = self.decoder(h_last)           # [B,4]
