@@ -42,3 +42,12 @@ class CrossAttentionFusion(nn.Module):
         attn_out, _ = self.attn(q, k, v)
         fused = self.norm(attn_out + q)
         return self.out_proj(fused)
+
+
+class ConcatFusion(nn.Module):
+    def __init__(self, morph_dim: int, cnn_dim: int) -> None:
+        super().__init__()
+        self.out_dim = morph_dim + cnn_dim
+
+    def forward(self, morph: torch.Tensor, cnn: torch.Tensor) -> torch.Tensor:
+        return torch.cat([morph, cnn], dim=-1)

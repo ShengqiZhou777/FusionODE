@@ -16,7 +16,7 @@ from src.data.preprocess import build_trajectories
 from src.data.dataset import SlidingWindowDataset
 from src.data.collate import collate_windows
 
-from src.models.full_model import FusionODERNNModel
+from src.models.full_model import FusionGRUModel, FusionLSTMModel, FusionODERNNModel
 from src.train.engine import train_one_epoch, eval_one_epoch
 from src.utils.seed import set_seed
 
@@ -58,6 +58,12 @@ def main():
     epochs = 200
     mc_test_runs = 20
     mc_test_base_seed = 1000
+
+    # model ablations
+    model_type = "odernn"  # "odernn", "gru", "lstm"
+    fusion_type = "cross_attention"  # "cross_attention" or "concat"
+    use_morph = True
+    use_cnn = True
 
     # condition to train on
     target_condition = "Light"
@@ -147,16 +153,47 @@ def main():
     Dm = batch0["morph"].shape[-1]
     Dc = batch0["bags"].shape[-1]
     
-    # Use FusionODERNNModel
-    model = FusionODERNNModel(
-        morph_dim=Dm,
-        cnn_dim=Dc,
-        z_morph=64,
-        z_cnn=64,
-        hidden_dim=128,
-        ode_hidden=128,
-        dropout=0.1,
-    ).to(device)
+    if model_type == "odernn":
+        model = FusionODERNNModel(
+            morph_dim=Dm,
+            cnn_dim=Dc,
+            z_morph=64,
+            z_cnn=64,
+            hidden_dim=128,
+            ode_hidden=128,
+            dropout=0.1,
+            use_morph=use_morph,
+            use_cnn=use_cnn,
+            fusion_type=fusion_type,
+        ).to(device)
+    elif model_type == "gru":
+        model = FusionGRUModel(
+            morph_dim=Dm,
+            cnn_dim=Dc,
+            z_morph=64,
+            z_cnn=64,
+            rnn_hidden=128,
+            rnn_layers=1,
+            dropout=0.1,
+            use_morph=use_morph,
+            use_cnn=use_cnn,
+            fusion_type=fusion_type,
+        ).to(device)
+    elif model_type == "lstm":
+        model = FusionLSTMModel(
+            morph_dim=Dm,
+            cnn_dim=Dc,
+            z_morph=64,
+            z_cnn=64,
+            rnn_hidden=128,
+            rnn_layers=1,
+            dropout=0.1,
+            use_morph=use_morph,
+            use_cnn=use_cnn,
+            fusion_type=fusion_type,
+        ).to(device)
+    else:
+        raise ValueError(f"Unsupported model_type: {model_type}")
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     
