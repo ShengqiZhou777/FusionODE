@@ -1,7 +1,9 @@
 from __future__ import annotations
+import argparse
 import os
 import random
 import csv
+from datetime import datetime
 import numpy as np
 import torch
 import sys
@@ -38,7 +40,46 @@ def compute_target_scaler(ds_subset: Subset) -> tuple[torch.Tensor, torch.Tensor
     return y_mean, y_std
 
 
-def main():
+def build_run_dir(
+    root: str,
+    run_name: str | None,
+    model_type: str,
+    fusion_type: str,
+    use_morph: bool,
+    use_cnn: bool,
+    target_condition: str,
+    window_size: int,
+) -> str:
+    if run_name is None:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        mod = "morph" if use_morph else ""
+        cnn = "cnn" if use_cnn else ""
+        modality = "+".join([m for m in [mod, cnn] if m]) or "none"
+        run_name = f"{timestamp}_{model_type}_{fusion_type}_{modality}_{target_condition}_w{window_size}"
+    return os.path.join(root, "runs", run_name)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Train Fusion ODE/RNN models with ablations.")
+    parser.add_argument("--model-type", choices=["odernn", "gru", "lstm"], default="odernn")
+    parser.add_argument("--fusion-type", choices=["cross_attention", "concat"], default="cross_attention")
+    parser.add_argument("--use-morph", action="store_true", default=True)
+    parser.add_argument("--morph-only", dest="use_cnn", action="store_false")
+    parser.add_argument("--use-cnn", action="store_true", default=True)
+    parser.add_argument("--cnn-only", dest="use_morph", action="store_false")
+    parser.add_argument("--target-condition", default="Light")
+    parser.add_argument("--window-size", type=int, default=4)
+    parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument("--epochs", type=int, default=200)
+    parser.add_argument("--lr", type=float, default=1e-2)
+    parser.add_argument("--weight-decay", type=float, default=1e-4)
+    parser.add_argument("--n-cells-per-bag", type=int, default=500)
+    parser.add_argument("--run-name", default=None)
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
     set_seed(0)
     g = torch.Generator()
     g.manual_seed(0)
@@ -49,24 +90,24 @@ def main():
     path_tgt = os.path.join(root, "data", "result.csv")
 
     # ---- hyperparams ----
-    window_size = 4
+    window_size = args.window_size
     predict_last = True
-    n_cells_per_bag = 500
-    batch_size = 8
-    lr = 1e-2
-    weight_decay = 1e-4
-    epochs = 200
+    n_cells_per_bag = args.n_cells_per_bag
+    batch_size = args.batch_size
+    lr = args.lr
+    weight_decay = args.weight_decay
+    epochs = args.epochs
     mc_test_runs = 20
     mc_test_base_seed = 1000
 
     # model ablations
-    model_type = "odernn"  # "odernn", "gru", "lstm"
-    fusion_type = "cross_attention"  # "cross_attention" or "concat"
-    use_morph = True
-    use_cnn = True
+    model_type = args.model_type  # "odernn", "gru", "lstm"
+    fusion_type = args.fusion_type  # "cross_attention" or "concat"
+    use_morph = args.use_morph
+    use_cnn = args.use_cnn
 
     # condition to train on
-    target_condition = "Light"
+    target_condition = args.target_condition
 
     # early stopping
     patience = 15
@@ -125,8 +166,18 @@ def main():
     print(f"[Target scaler]\n y_mean: {y_mean.tolist()}\n y_std : {y_std.tolist()}")
 
     # 保存 scaler
-    os.makedirs(os.path.join(root, "runs"), exist_ok=True)
-    scaler_path = os.path.join(root, "runs", f"scaler_{target_condition}.pt")
+    run_dir = build_run_dir(
+        root,
+        args.run_name,
+        model_type,
+        fusion_type,
+        use_morph,
+        use_cnn,
+        target_condition,
+        window_size,
+    )
+    os.makedirs(run_dir, exist_ok=True)
+    scaler_path = os.path.join(run_dir, f"scaler_{target_condition}.pt")
     torch.save({"y_mean": y_mean, "y_std": y_std}, scaler_path)
     print("[Saved scaler]", scaler_path)
 
@@ -203,8 +254,9 @@ def main():
         )
 
     # ---- train loop ----
-    os.makedirs(os.path.join(root, "runs"), exist_ok=True)
-    ckpt_path = os.path.join(root, "runs", f"best_ode_{target_condition}.pt")
+    ckpt_path = os.path.join(run_dir, f"best_ode_{target_condition}.pt")
+
+    target_names = ["Dry_Weight", "Chl_Per_Cell", "Fv_Fm", "Oxygen_Rate"]
 
     target_names = ["Dry_Weight", "Chl_Per_Cell", "Fv_Fm", "Oxygen_Rate"]
 
@@ -393,12 +445,9 @@ def main():
                 f"Oxygen_Rate={mean_r2_t3:.4f}±{std_r2_t3:.4f}"
             )
 
-            os.makedirs(os.path.join(root, "runs"), exist_ok=True)
-            
             # Save metrics CSV (existing)
             mc_path = os.path.join(
-                root,
-                "runs",
+                run_dir,
                 f"mc_metrics_{target_condition}_w{window_size}_k{mc_test_runs}.csv",
             )
             fieldnames = sorted(metrics_list[0].keys())
@@ -413,8 +462,7 @@ def main():
 
             # Save preds CSV (new)
             preds_path = os.path.join(
-                root,
-                "runs",
+                run_dir,
                 f"mc_preds_{target_condition}_w{window_size}_k{mc_test_runs}.csv",
             )
             with open(preds_path, "w", newline="") as f:
