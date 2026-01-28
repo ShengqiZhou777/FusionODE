@@ -83,13 +83,17 @@ def eval_one_epoch(
     device: torch.device,
     y_mean: Optional[torch.Tensor] = None,
     y_std: Optional[torch.Tensor] = None,
-) -> Dict[str, float]:
+    return_preds: bool = False,
+) -> Dict[str, float] | tuple[Dict[str, float], np.ndarray, np.ndarray]:
     """
     Returns dict:
       - mse_norm: MSE in normalized target space (if y_mean/y_std provided), else equals mse_raw
       - mse_raw:  MSE in original target units
       - mae_raw_t*: MAE for each target
       - rmse_raw_t*: RMSE for each target
+      - r2_t*: R2 for each target
+      
+    If return_preds is True, returns (out_dict, Y_numpy, YH_numpy) instead.
     """
     model.eval()
     
@@ -124,34 +128,29 @@ def eval_one_epoch(
 
     mae = (YH - Y).abs().mean(dim=0)                 # [4]
     rmse = torch.sqrt(((YH - Y) ** 2).mean(dim=0))   # [4]
+
+    # R2 Calculation per target
     ss_res = ((YH - Y) ** 2).sum(dim=0)
     y_mean = Y.mean(dim=0)
     ss_tot = ((Y - y_mean) ** 2).sum(dim=0)
-    r2 = 1.0 - (ss_res / (ss_tot + 1e-12))
+    r2 = 1.0 - (ss_res / (ss_tot + 1e-12)) # [4]
 
     mse_raw = float(sum(mse_raw_list) / max(len(mse_raw_list), 1))
     if use_norm:
         mse_norm = float(sum(mse_norm_list) / max(len(mse_norm_list), 1))
     else:
         mse_norm = mse_raw
-
     out = {
         "mse_raw": mse_raw,
         "mse_norm": mse_norm,
-        "mae_raw_t0": float(mae[0]),
-        "mae_raw_t1": float(mae[1]),
-        "mae_raw_t2": float(mae[2]),
-        "mae_raw_t3": float(mae[3]),
-        "rmse_raw_t0": float(rmse[0]),
-        "rmse_raw_t1": float(rmse[1]),
-        "rmse_raw_t2": float(rmse[2]),
-        "rmse_raw_t3": float(rmse[3]),
-        "r2_t0": float(r2[0]),
-        "r2_t1": float(r2[1]),
-        "r2_t2": float(r2[2]),
-        "r2_t3": float(r2[3]),
-        "r2_mean": float(r2.mean()),
+        "mae_raw_t0": float(mae[0]), "mae_raw_t1": float(mae[1]), "mae_raw_t2": float(mae[2]), "mae_raw_t3": float(mae[3]),
+        "rmse_raw_t0": float(rmse[0]), "rmse_raw_t1": float(rmse[1]), "rmse_raw_t2": float(rmse[2]), "rmse_raw_t3": float(rmse[3]),
+        "r2_t0": float(r2[0]), "r2_t1": float(r2[1]), "r2_t2": float(r2[2]), "r2_t3": float(r2[3]),
     }
+    
+    if return_preds:
+        return out, Y.numpy(), YH.numpy()
+        
     return out
 
 

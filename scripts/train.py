@@ -49,14 +49,14 @@ def main():
     path_tgt = os.path.join(root, "data", "result.csv")
 
     # ---- hyperparams ----
-    window_size = 5
+    window_size = 4
     predict_last = True
     n_cells_per_bag = 500
     batch_size = 8
     lr = 1e-2
     weight_decay = 1e-4
     epochs = 200
-    mc_test_runs = 1
+    mc_test_runs = 20
     mc_test_base_seed = 1000
 
     # condition to train on
@@ -97,14 +97,26 @@ def main():
     ds_train = SlidingWindowDataset(traj_train, window_size=window_size, predict_last=predict_last)
     ds_val = SlidingWindowDataset(traj_val, window_size=window_size, predict_last=predict_last)
     ds_test = SlidingWindowDataset(traj_test, window_size=window_size, predict_last=predict_last)
+    # early stopping & scheduler
+    patience = 15
+    bad_epochs = 0
+    best_val_norm = float("inf")
+    best_val_raw = float("inf")
+    
+    # Scheduler params
+    use_scheduler = True
+    scheduler_factor = 0.5
+    scheduler_patience = 5
+    min_lr = 1e-6
+    
+    # Gradient clipping
+    grad_clip = 1.0
 
     print(f"[Dataset] train={len(ds_train)} | val={len(ds_val)} | test={len(ds_test)}")
 
     # ---- target scaler from TRAIN only ----
     y_mean, y_std = compute_target_scaler(ds_train)
-    print("[Target scaler]")
-    print(" y_mean:", y_mean.tolist())
-    print(" y_std :", y_std.tolist())
+    print(f"[Target scaler]\n y_mean: {y_mean.tolist()}\n y_std : {y_std.tolist()}")
 
     # 保存 scaler
     os.makedirs(os.path.join(root, "runs"), exist_ok=True)
@@ -134,7 +146,8 @@ def main():
     batch0 = next(iter(dl_train))
     Dm = batch0["morph"].shape[-1]
     Dc = batch0["bags"].shape[-1]
-
+    
+    # Use FusionODERNNModel
     model = FusionODERNNModel(
         morph_dim=Dm,
         cnn_dim=Dc,
@@ -146,52 +159,48 @@ def main():
     ).to(device)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
-    # ---- training ----
-    best_val_raw = float("inf")
-    best_val_norm = float("inf")
-    bad_epochs = 0
+    
+    if use_scheduler:
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode='min', factor=scheduler_factor, patience=scheduler_patience, min_lr=min_lr
+        )
 
+    # ---- train loop ----
+    os.makedirs(os.path.join(root, "runs"), exist_ok=True)
     ckpt_path = os.path.join(root, "runs", f"best_ode_{target_condition}.pt")
 
-    for ep in range(1, epochs + 1):
-        tr = train_one_epoch(model, dl_train, optimizer, device, y_mean=y_mean, y_std=y_std, grad_clip=1.0)
+    for ep in range(epochs):
+        tr = train_one_epoch(model, dl_train, optimizer, device, y_mean=y_mean, y_std=y_std, grad_clip=grad_clip)
         va = eval_one_epoch(model, dl_val, device, y_mean=y_mean, y_std=y_std)
 
-        val_score = va["mse_raw"]                 # ✅ early stop 用 raw
-        improved = (best_val_raw - val_score) > min_delta
+        # Scheduler step
+        if use_scheduler:
+            scheduler.step(va["mse_norm"])
+            
+        cur_lr = optimizer.param_groups[0]["lr"]
 
-        if improved:
-            best_val_raw = val_score
+        # Checkpoint (save based on Normalized MSE)
+        if va["mse_norm"] < best_val_norm:
             best_val_norm = va["mse_norm"]
+            best_val_raw = va["mse_raw"]
             bad_epochs = 0
             torch.save(
-                {
-                    "model": model.state_dict(),
-                    "optimizer": optimizer.state_dict(),
-                    "epoch": ep,
-                    "best_val_mse_raw": best_val_raw,
-                    "best_val_mse_norm": best_val_norm,
-                    "y_mean": y_mean,
-                    "y_std": y_std,
-                    "target_condition": target_condition,
-                },
+                {"model": model.state_dict(), "config": {}},
                 ckpt_path,
             )
             # 只有在 improve 的时候打印详细指标，避免刷屏
             print(
                 "  [New Best] "
-                f"val_rmse: t0={va['rmse_raw_t0']:.4f}, t1={va['rmse_raw_t1']:.4f}, "
-                f"t2={va['rmse_raw_t2']:.4f}, t3={va['rmse_raw_t3']:.4f} | "
-                f"val_r2_mean={va['r2_mean']:.4f}"
+                f"RMSE: t0={va['rmse_raw_t0']:.3f}, t1={va['rmse_raw_t1']:.3f}, "
+                f"t2={va['rmse_raw_t2']:.3f}, t3={va['rmse_raw_t3']:.3f}"
             )
         else:
             bad_epochs += 1
 
         print(
-            f"Epoch {ep:03d} | "
-            f"train_mse_norm={tr['mse_norm']:.6f} train_mse_raw={tr['mse_raw']:.6f} | "
-            f"val_mse_norm={va['mse_norm']:.6f} val_mse_raw={va['mse_raw']:.6f} val_r2_mean={va['r2_mean']:.4f} | "
-            f"best_val_raw={best_val_raw:.6f} best_val_norm={best_val_norm:.6f} | "
+            f"Epoch {ep:03d} | lr={cur_lr:.2e} | "
+            f"Train Loss={tr['mse_norm']:.4f} | "
+            f"Val Loss={va['mse_norm']:.4f} Val MSE={va['mse_raw']:.4f} | "
             f"bad_epochs={bad_epochs}/{patience}"
         )
 
@@ -221,8 +230,7 @@ def main():
             test_metrics = eval_one_epoch(model, dl_test, device, y_mean=y_mean, y_std=y_std)
             print(
                 f"[Test Result] mse_raw={test_metrics['mse_raw']:.6f} | "
-                f"mse_norm={test_metrics['mse_norm']:.6f} | "
-                f"r2_mean={test_metrics['r2_mean']:.4f}"
+                f"mse_norm={test_metrics['mse_norm']:.6f}"
             )
             print(
                 "[Test RMSE] "
@@ -236,6 +244,9 @@ def main():
             )
         else:
             metrics_list = []
+            all_preds_rows = []
+            target_names = ["Dry_Weight", "Chl_Per_Cell", "Fv_Fm", "Oxygen_Rate"]
+
             for run_idx in range(mc_test_runs):
                 traj_train_mc, traj_val_mc, traj_test_mc = build_trajectories(
                     df_cnn, df_morph, df_tgt,
@@ -247,6 +258,9 @@ def main():
                     sample_with_replacement=True,
                 )
                 traj_test_mc = {k: v for k, v in traj_test_mc.items() if k == target_condition}
+                if not traj_test_mc:
+                    continue
+
                 ds_test_mc = SlidingWindowDataset(traj_test_mc, window_size=window_size, predict_last=predict_last)
                 dl_test_mc = DataLoader(
                     ds_test_mc,
@@ -256,8 +270,24 @@ def main():
                     collate_fn=collate_windows,
                     generator=g,
                 )
-                metrics = eval_one_epoch(model, dl_test_mc, device, y_mean=y_mean, y_std=y_std)
+                metrics, Y_true, Y_pred = eval_one_epoch(model, dl_test_mc, device, y_mean=y_mean, y_std=y_std, return_preds=True)
                 metrics_list.append(metrics)
+
+                # Collect predictions
+                # Y_true, Y_pred: [N, 4]
+                N = Y_true.shape[0]
+                for i in range(N):
+                    for t_idx, t_name in enumerate(target_names):
+                        all_preds_rows.append({
+                            "run": run_idx,
+                            "target": t_name,
+                            "true": float(Y_true[i, t_idx]),
+                            "pred": float(Y_pred[i, t_idx])
+                        })
+
+            if not metrics_list:
+                print("[MC Test] No valid test runs completed.")
+                return
 
             def _mean_std(key: str) -> tuple[float, float]:
                 vals = np.array([m[key] for m in metrics_list], dtype=np.float64)
@@ -265,17 +295,21 @@ def main():
 
             mean_mse_raw, std_mse_raw = _mean_std("mse_raw")
             mean_mse_norm, std_mse_norm = _mean_std("mse_norm")
-            mean_r2, std_r2 = _mean_std("r2_mean")
+            
             mean_rmse_t0, std_rmse_t0 = _mean_std("rmse_raw_t0")
             mean_rmse_t1, std_rmse_t1 = _mean_std("rmse_raw_t1")
             mean_rmse_t2, std_rmse_t2 = _mean_std("rmse_raw_t2")
             mean_rmse_t3, std_rmse_t3 = _mean_std("rmse_raw_t3")
 
+            mean_r2_t0, std_r2_t0 = _mean_std("r2_t0")
+            mean_r2_t1, std_r2_t1 = _mean_std("r2_t1")
+            mean_r2_t2, std_r2_t2 = _mean_std("r2_t2")
+            mean_r2_t3, std_r2_t3 = _mean_std("r2_t3")
+
             print(f"[MC Test] runs={mc_test_runs}")
             print(
                 f"[MC Result] mse_raw={mean_mse_raw:.6f}±{std_mse_raw:.6f} | "
-                f"mse_norm={mean_mse_norm:.6f}±{std_mse_norm:.6f} | "
-                f"r2_mean={mean_r2:.4f}±{std_r2:.4f}"
+                f"mse_norm={mean_mse_norm:.6f}±{std_mse_norm:.6f}"
             )
             print(
                 "[MC RMSE] "
@@ -284,12 +318,21 @@ def main():
                 f"t2={mean_rmse_t2:.4f}±{std_rmse_t2:.4f}, "
                 f"t3={mean_rmse_t3:.4f}±{std_rmse_t3:.4f}"
             )
+            print(
+                "[MC R2] "
+                f"t0={mean_r2_t0:.4f}±{std_r2_t0:.4f}, "
+                f"t1={mean_r2_t1:.4f}±{std_r2_t1:.4f}, "
+                f"t2={mean_r2_t2:.4f}±{std_r2_t2:.4f}, "
+                f"t3={mean_r2_t3:.4f}±{std_r2_t3:.4f}"
+            )
 
             os.makedirs(os.path.join(root, "runs"), exist_ok=True)
+            
+            # Save metrics CSV (existing)
             mc_path = os.path.join(
                 root,
                 "runs",
-                f"mc_test_{target_condition}_w{window_size}_k{mc_test_runs}.csv",
+                f"mc_metrics_{target_condition}_w{window_size}_k{mc_test_runs}.csv",
             )
             fieldnames = sorted(metrics_list[0].keys())
             with open(mc_path, "w", newline="") as f:
@@ -299,7 +342,19 @@ def main():
                     row = {"run": i}
                     row.update(m)
                     writer.writerow(row)
-            print(f"[MC Saved] {mc_path}")
+            print(f"[MC Metrics Saved] {mc_path}")
+
+            # Save preds CSV (new)
+            preds_path = os.path.join(
+                root,
+                "runs",
+                f"mc_preds_{target_condition}_w{window_size}_k{mc_test_runs}.csv",
+            )
+            with open(preds_path, "w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=["run", "target", "true", "pred"])
+                writer.writeheader()
+                writer.writerows(all_preds_rows)
+            print(f"[MC Preds Saved] {preds_path}")
     else:
         print("[Test] No test data available (ds_test is empty).")
 
