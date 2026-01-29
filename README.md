@@ -75,6 +75,20 @@ python scripts/train.py --config configs/diagnostic/odernn_morph_only_dark.json
 python scripts/train.py --config configs/diagnostic/odernn_image_only_dark.json
 ```
 
+### Extrapolation split + target shuffle diagnostics
+
+To evaluate true forecasting (extrapolation), split by timepoints instead of cells:
+
+```bash
+python scripts/train.py --config configs/ablation/step3_odernn_dark.json --set data.split_strategy=time
+```
+
+To test for time leakage directly, shuffle targets across timepoints **within** each condition:
+
+```bash
+python scripts/train.py --config configs/ablation/step3_odernn_dark.json --set data.target_shuffle=within_condition
+```
+
 ## Reproducibility
 
 To reproduce an experiment:

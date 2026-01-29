@@ -58,6 +58,8 @@ def build_trajectories(
     df_target: pd.DataFrame,
     n_cells_per_bag: int = 500,
     split_ratios: tuple[float, float, float] = (0.7, 0.15, 0.15),
+    split_strategy: Literal["cell", "time"] = "cell",
+    target_shuffle: Literal["none", "within_condition"] = "none",
     seed: int = 0,
     split_seed: int | None = None,
     bag_seed: int | None = None,
@@ -66,8 +68,10 @@ def build_trajectories(
     """
     params:
       n_cells_per_bag: 每个时间点最多采样的细胞数 (Bag Size).
-      split_seed: 控制 cell split 的随机种子（不设则回退到 seed）
+      split_seed: 控制 split 的随机种子（不设则回退到 seed）
       bag_seed: 控制 bag 采样的随机种子（不设则回退到 seed）
+      split_strategy: "cell"=同一时间点内按细胞划分, "time"=按时间点整体划分
+      target_shuffle: "none"=不打乱, "within_condition"=在同一condition内打乱时间点的target
     returns: (traj_train, traj_val, traj_test)
     """
     # --- 找列 ---
@@ -108,6 +112,12 @@ def build_trajectories(
 
     for cond in sorted({k[0] for k in keys}):
         cond_keys = sorted([k for k in keys if k[0] == cond], key=lambda x: x[1])
+        target_map = {k: k for k in cond_keys}
+        if target_shuffle == "within_condition":
+            rng_shuffle = _stable_rng(split_seed, cond, "target_shuffle")
+            shuffled = list(cond_keys)
+            rng_shuffle.shuffle(shuffled)
+            target_map = dict(zip(cond_keys, shuffled))
 
         # Containers
         data_containers = {
@@ -115,6 +125,24 @@ def build_trajectories(
             "val":   {"times": [], "morph": [], "bags": [], "targets": [], "cell_ids": []},
             "test":  {"times": [], "morph": [], "bags": [], "targets": [], "cell_ids": []}
         }
+
+        if split_strategy == "time":
+            n_total = len(cond_keys)
+            n_train = int(n_total * split_ratios[0])
+            n_val = int(n_total * split_ratios[1])
+            train_times = set(cond_keys[:n_train])
+            val_times = set(cond_keys[n_train : n_train + n_val])
+            test_times = set(cond_keys[n_train + n_val :])
+
+            time_split = {}
+            for key in train_times:
+                time_split[key] = "train"
+            for key in val_times:
+                time_split[key] = "val"
+            for key in test_times:
+                time_split[key] = "test"
+        else:
+            time_split = {}
 
         for (c, t) in cond_keys:
             df_m = morph_groups[(c, t)]
@@ -124,20 +152,27 @@ def build_trajectories(
             if len(common_cells) == 0:
                 continue
 
-            rng_split = _stable_rng(split_seed, c, t, "split")
-            rng_split.shuffle(common_cells)
+            if split_strategy == "time":
+                split_name = time_split.get((c, t))
+                if split_name is None:
+                    continue
+                split_assignments = [(split_name, set(common_cells))]
+            else:
+                rng_split = _stable_rng(split_seed, c, t, "split")
+                rng_split.shuffle(common_cells)
 
-            # Split cells
-            n_total = len(common_cells)
-            n_train = int(n_total * split_ratios[0])
-            n_val = int(n_total * split_ratios[1])
-            # n_test = rest
+                # Split cells
+                n_total = len(common_cells)
+                n_train = int(n_total * split_ratios[0])
+                n_val = int(n_total * split_ratios[1])
+                # n_test = rest
 
-            train_cells = set(common_cells[:n_train])
-            val_cells = set(common_cells[n_train : n_train + n_val])
-            test_cells = set(common_cells[n_train + n_val :])
+                train_cells = set(common_cells[:n_train])
+                val_cells = set(common_cells[n_train : n_train + n_val])
+                test_cells = set(common_cells[n_train + n_val :])
+                split_assignments = [("train", train_cells), ("val", val_cells), ("test", test_cells)]
 
-            for split_name, cell_set in [("train", train_cells), ("val", val_cells), ("test", test_cells)]:
+            for split_name, cell_set in split_assignments:
                 if len(cell_set) == 0:
                     continue
 
@@ -180,7 +215,7 @@ def build_trajectories(
                 bag_tensor = torch.tensor(cg, dtype=torch.float32)
 
                 # Target
-                tr = tgt_groups[(c, float(t))]
+                tr = tgt_groups[target_map[(c, float(t))]]
                 y = np.array([tr[k] for k in target_cols], dtype=np.float32)
 
                 dc = data_containers[split_name]
