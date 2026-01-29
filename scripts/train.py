@@ -311,6 +311,9 @@ def _build_model(
             fusion_type=fusion_type,
             attn_dim=model_cfg.get("attn_dim", 64),
             attn_heads=model_cfg.get("attn_heads", 4),
+            use_time=time_features != "none",
+            time_features=time_features,
+            time_scale=time_scale,
         )
     if model_type == "gru":
         return FusionGRUModel(
