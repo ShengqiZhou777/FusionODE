@@ -1,12 +1,15 @@
 from __future__ import annotations
 import argparse
-import os
-import random
 import csv
 from datetime import datetime
+import json
+import os
+import random
+import sys
+from typing import Any, Mapping
+
 import numpy as np
 import torch
-import sys
 from torch.utils.data import DataLoader, Subset
 # Ensure project root is in sys.path
 root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -68,40 +71,70 @@ def build_run_dir(
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train Fusion ODE/RNN models with ablations.")
-    parser.add_argument("--model-type", choices=["odernn", "gru", "lstm", "static"], default="odernn")
-    parser.add_argument("--fusion-type", choices=["cross_attention", "concat"], default="cross_attention")
-    parser.add_argument("--use-morph", action="store_true", default=True)
-    parser.add_argument("--morph-only", dest="use_cnn", action="store_false")
-    parser.add_argument("--use-cnn", action="store_true", default=True)
-    parser.add_argument("--cnn-only", dest="use_morph", action="store_false")
-    parser.add_argument("--target-condition", default="Light")
-    parser.add_argument("--window-size", type=int, default=4)
-    parser.add_argument("--batch-size", type=int, default=8)
-    parser.add_argument("--epochs", type=int, default=200)
-    parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--weight-decay", type=float, default=1e-4)
-    parser.add_argument("--n-cells-per-bag", type=int, default=500)
-    parser.add_argument("--rnn-hidden", type=int, default=128)
-    parser.add_argument("--rnn-layers", type=int, default=1)
-    parser.add_argument("--hidden-dim", type=int, default=128)
-    parser.add_argument("--ode-hidden", type=int, default=128)
-    parser.add_argument("--attn-dim", type=int, default=64)
-    parser.add_argument("--attn-heads", type=int, default=4)
-    parser.add_argument("--dropout", type=float, default=0.1)
-    parser.add_argument("--grad-clip", type=float, default=1.0)
+    parser = argparse.ArgumentParser(description="Train Fusion ODE/RNN models with config files.")
+    parser.add_argument("--config", required=True, help="Path to JSON/YAML config file.")
     parser.add_argument(
-        "--time-features",
-        choices=["none", "absolute", "absolute+delta"],
-        default="absolute+delta",
-        help="Time features for GRU/LSTM/static baselines (improves irregular sampling awareness).",
+        "--set",
+        action="append",
+        default=[],
+        help="Override config entries, e.g. --set train.lr=1e-4 (repeatable).",
     )
-    parser.add_argument("--time-scale", type=float, default=None)
-    parser.add_argument("--overfit-n", type=int, default=0)
-    parser.add_argument("--skip-inspect-data", action="store_true")
-    parser.add_argument("--eval-looto", action="store_true")
-    parser.add_argument("--run-name", default=None)
     return parser.parse_args()
+
+
+def _load_yaml(path: str) -> dict:
+    try:
+        import yaml  # type: ignore
+    except ImportError as exc:
+        raise ImportError("PyYAML is required to read YAML configs.") from exc
+    with open(path, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
+
+
+def _load_config(path: str) -> dict:
+    ext = os.path.splitext(path)[1].lower()
+    if ext in {".yml", ".yaml"}:
+        return _load_yaml(path)
+    if ext == ".json":
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    raise ValueError(f"Unsupported config extension: {ext}")
+
+
+def _coerce_value(raw: str) -> Any:
+    lowered = raw.lower()
+    if lowered in {"true", "false"}:
+        return lowered == "true"
+    try:
+        if "." in raw:
+            return float(raw)
+        return int(raw)
+    except ValueError:
+        return raw
+
+
+def _set_nested(config: dict, dotted_key: str, value: Any) -> None:
+    keys = dotted_key.split(".")
+    cur = config
+    for key in keys[:-1]:
+        if key not in cur or not isinstance(cur[key], dict):
+            cur[key] = {}
+        cur = cur[key]
+    cur[keys[-1]] = value
+
+
+def _apply_overrides(config: dict, overrides: list[str]) -> None:
+    for item in overrides:
+        if "=" not in item:
+            raise ValueError(f"Override must be key=value, got: {item}")
+        key, raw_value = item.split("=", 1)
+        _set_nested(config, key, _coerce_value(raw_value))
+
+
+def _require(cfg: Mapping[str, Any], key: str) -> Any:
+    if key not in cfg:
+        raise KeyError(f"Missing required config key: {key}")
+    return cfg[key]
 
 
 def _inspect_split_overlap(traj_train: dict, traj_val: dict, traj_test: dict) -> None:
@@ -201,6 +234,14 @@ def _eval_leave_one_timepoint(
 
 def main() -> None:
     args = parse_args()
+    config = _load_config(args.config)
+    _apply_overrides(config, args.set)
+
+    train_cfg = _require(config, "train")
+    model_cfg = _require(config, "model")
+    data_cfg = _require(config, "data")
+    eval_cfg = config.get("eval", {})
+    run_cfg = config.get("run", {})
     set_seed(0)
     g = torch.Generator()
     g.manual_seed(0)
@@ -211,37 +252,37 @@ def main() -> None:
     path_tgt = os.path.join(root, "data", "result.csv")
 
     # ---- hyperparams ----
-    window_size = args.window_size
+    window_size = train_cfg.get("window_size", 4)
     predict_last = True
-    n_cells_per_bag = args.n_cells_per_bag
-    batch_size = args.batch_size
-    lr = args.lr
-    weight_decay = args.weight_decay
-    epochs = args.epochs
-    mc_test_runs = 20
-    mc_test_base_seed = 1000
+    n_cells_per_bag = train_cfg.get("n_cells_per_bag", 500)
+    batch_size = train_cfg.get("batch_size", 8)
+    lr = train_cfg.get("lr", 1e-3)
+    weight_decay = train_cfg.get("weight_decay", 1e-4)
+    epochs = train_cfg.get("epochs", 200)
+    mc_test_runs = eval_cfg.get("mc_test_runs", 20)
+    mc_test_base_seed = eval_cfg.get("mc_test_base_seed", 1000)
 
     # model ablations
-    model_type = args.model_type  # "odernn", "gru", "lstm", "static"
-    fusion_type = args.fusion_type  # "cross_attention" or "concat"
-    use_morph = args.use_morph
-    use_cnn = args.use_cnn
+    model_type = model_cfg.get("type", "odernn")  # "odernn", "gru", "lstm", "static"
+    fusion_type = model_cfg.get("fusion_type", "cross_attention")  # "cross_attention" or "concat"
+    use_morph = model_cfg.get("use_morph", True)
+    use_cnn = model_cfg.get("use_cnn", True)
 
     # condition to train on
-    target_condition = args.target_condition
+    target_condition = train_cfg.get("target_condition", "Light")
 
     # early stopping
-    patience = 15
-    min_delta = 0.0
+    patience = train_cfg.get("patience", 15)
+    min_delta = train_cfg.get("min_delta", 0.0)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("[Device]", device)
     print(f"[Target Condition] {target_condition}")
 
     # ---- load + build trajectories (Cell-Level Split) ----
-    df_cnn = read_cnn(path_cnn)
-    df_morph = read_morph(path_morph)
-    df_tgt = read_targets(path_tgt)
+    df_cnn = read_cnn(data_cfg.get("cnn_path", path_cnn))
+    df_morph = read_morph(data_cfg.get("morph_path", path_morph))
+    df_tgt = read_targets(data_cfg.get("target_path", path_tgt))
 
     # 返回 (traj_train, traj_val, traj_test) (Contains ALL conditions)
     print(f"[Build] Splitting cells 70% Train / 15% Val / 15% Test per timepoint...")
@@ -265,24 +306,24 @@ def main() -> None:
     ds_train = SlidingWindowDataset(traj_train, window_size=window_size, predict_last=predict_last)
     ds_val = SlidingWindowDataset(traj_val, window_size=window_size, predict_last=predict_last)
     ds_test = SlidingWindowDataset(traj_test, window_size=window_size, predict_last=predict_last)
-    ds_train, ds_val = _prepare_overfit_subset(ds_train, ds_val, args.overfit_n)
+    ds_train, ds_val = _prepare_overfit_subset(ds_train, ds_val, train_cfg.get("overfit_n", 0))
     # early stopping & scheduler
-    patience = 15
+    patience = train_cfg.get("patience", 15)
     bad_epochs = 0
     best_val_norm = float("inf")
     best_val_raw = float("inf")
     
     # Scheduler params
-    use_scheduler = True
-    scheduler_factor = 0.5
-    scheduler_patience = 5
-    min_lr = 1e-6
+    use_scheduler = train_cfg.get("use_scheduler", True)
+    scheduler_factor = train_cfg.get("scheduler_factor", 0.5)
+    scheduler_patience = train_cfg.get("scheduler_patience", 5)
+    min_lr = train_cfg.get("min_lr", 1e-6)
     
     # Gradient clipping
-    grad_clip = args.grad_clip
+    grad_clip = train_cfg.get("grad_clip", 1.0)
 
     print(f"[Dataset] train={len(ds_train)} | val={len(ds_val)} | test={len(ds_test)}")
-    if not args.skip_inspect_data:
+    if not train_cfg.get("skip_inspect_data", False):
         _inspect_split_overlap(traj_train, traj_val, traj_test)
 
     # ---- target scaler from TRAIN only ----
@@ -292,7 +333,7 @@ def main() -> None:
     # 保存 scaler
     run_dir = build_run_dir(
         root,
-        args.run_name,
+        run_cfg.get("name"),
         model_type,
         fusion_type,
         use_morph,
@@ -328,8 +369,8 @@ def main() -> None:
     Dm = batch0["morph"].shape[-1]
     Dc = batch0["bags"].shape[-1]
     
-    time_scale = _build_time_scale(traj_train, target_condition, args.time_scale)
-    time_features = args.time_features
+    time_scale = _build_time_scale(traj_train, target_condition, model_cfg.get("time_scale"))
+    time_features = model_cfg.get("time_features", "absolute+delta")
 
     if model_type == "odernn":
         model = FusionODERNNModel(
@@ -337,14 +378,14 @@ def main() -> None:
             cnn_dim=Dc,
             z_morph=64,
             z_cnn=64,
-            hidden_dim=args.hidden_dim,
-            ode_hidden=args.ode_hidden,
-            dropout=args.dropout,
+            hidden_dim=model_cfg.get("hidden_dim", 128),
+            ode_hidden=model_cfg.get("ode_hidden", 128),
+            dropout=model_cfg.get("dropout", 0.1),
             use_morph=use_morph,
             use_cnn=use_cnn,
             fusion_type=fusion_type,
-            attn_dim=args.attn_dim,
-            attn_heads=args.attn_heads,
+            attn_dim=model_cfg.get("attn_dim", 64),
+            attn_heads=model_cfg.get("attn_heads", 4),
         ).to(device)
     elif model_type == "gru":
         model = FusionGRUModel(
@@ -352,14 +393,14 @@ def main() -> None:
             cnn_dim=Dc,
             z_morph=64,
             z_cnn=64,
-            rnn_hidden=args.rnn_hidden,
-            rnn_layers=args.rnn_layers,
-            dropout=args.dropout,
+            rnn_hidden=model_cfg.get("rnn_hidden", 128),
+            rnn_layers=model_cfg.get("rnn_layers", 1),
+            dropout=model_cfg.get("dropout", 0.1),
             use_morph=use_morph,
             use_cnn=use_cnn,
             fusion_type=fusion_type,
-            attn_dim=args.attn_dim,
-            attn_heads=args.attn_heads,
+            attn_dim=model_cfg.get("attn_dim", 64),
+            attn_heads=model_cfg.get("attn_heads", 4),
             use_time=time_features != "none",
             time_features=time_features,
             time_scale=time_scale,
@@ -370,14 +411,14 @@ def main() -> None:
             cnn_dim=Dc,
             z_morph=64,
             z_cnn=64,
-            rnn_hidden=args.rnn_hidden,
-            rnn_layers=args.rnn_layers,
-            dropout=args.dropout,
+            rnn_hidden=model_cfg.get("rnn_hidden", 128),
+            rnn_layers=model_cfg.get("rnn_layers", 1),
+            dropout=model_cfg.get("dropout", 0.1),
             use_morph=use_morph,
             use_cnn=use_cnn,
             fusion_type=fusion_type,
-            attn_dim=args.attn_dim,
-            attn_heads=args.attn_heads,
+            attn_dim=model_cfg.get("attn_dim", 64),
+            attn_heads=model_cfg.get("attn_heads", 4),
             use_time=time_features != "none",
             time_features=time_features,
             time_scale=time_scale,
@@ -388,12 +429,12 @@ def main() -> None:
             cnn_dim=Dc,
             z_morph=64,
             z_cnn=64,
-            dropout=args.dropout,
+            dropout=model_cfg.get("dropout", 0.1),
             use_morph=use_morph,
             use_cnn=use_cnn,
             fusion_type=fusion_type,
-            attn_dim=args.attn_dim,
-            attn_heads=args.attn_heads,
+            attn_dim=model_cfg.get("attn_dim", 64),
+            attn_heads=model_cfg.get("attn_heads", 4),
             use_time=time_features != "none",
             time_features=time_features,
             time_scale=time_scale,
@@ -626,7 +667,7 @@ def main() -> None:
     else:
         print("[Test] No test data available (ds_test is empty).")
 
-    if args.eval_looto and len(ds_test) > 0:
+    if eval_cfg.get("eval_looto", False) and len(ds_test) > 0:
         _eval_leave_one_timepoint(
             model,
             ds_test,
