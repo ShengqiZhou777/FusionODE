@@ -1,0 +1,48 @@
+{
+  "run": {
+    "name": null
+  },
+  "data": {
+    "cnn_path": "data/cnn_features_pca.csv",
+    "morph_path": "data/morph_features.csv",
+    "target_path": "data/result.csv"
+  },
+  "model": {
+    "type": "odernn",
+    "fusion_type": "cross_attention",
+    "use_morph": true,
+    "use_cnn": true,
+    "rnn_hidden": 128,
+    "rnn_layers": 1,
+    "hidden_dim": 128,
+    "ode_hidden": 128,
+    "attn_dim": 64,
+    "attn_heads": 4,
+    "dropout": 0.1,
+    "time_features": "absolute+delta",
+    "time_scale": null
+  },
+  "train": {
+    "target_condition": "Light",
+    "window_size": 4,
+    "batch_size": 8,
+    "epochs": 200,
+    "lr": 0.001,
+    "weight_decay": 0.0001,
+    "n_cells_per_bag": 500,
+    "grad_clip": 1.0,
+    "patience": 15,
+    "min_delta": 0.0,
+    "use_scheduler": true,
+    "scheduler_factor": 0.5,
+    "scheduler_patience": 5,
+    "min_lr": 1e-6,
+    "overfit_n": 0,
+    "skip_inspect_data": false
+  },
+  "eval": {
+    "eval_looto": false,
+    "mc_test_runs": 20,
+    "mc_test_base_seed": 1000
+  }
+}
