@@ -50,6 +50,31 @@ The training loop supports:
 
 See `src/train/` for details on the loss and metrics implementations.
 
+## Diagnostic experiments (time-only vs. morph-only vs. image-only)
+
+To sanity-check whether time features dominate interpolation performance, run the GRU
+diagnostic configs below (all use the same training settings; only the input modality
+changes). These compare:
+
+* **Time-only** (no morph, no CNN features; time features only)
+* **Morph-only**
+* **Image-only** (CNN bag features)
+
+```bash
+python scripts/train.py --config configs/diagnostic/gru_time_only_dark.json
+python scripts/train.py --config configs/diagnostic/gru_morph_only_dark.json
+python scripts/train.py --config configs/diagnostic/gru_image_only_dark.json
+```
+
+You can run the same diagnostic suite with the ODE-RNN model to see whether its performance
+is similarly dominated by time features:
+
+```bash
+python scripts/train.py --config configs/diagnostic/odernn_time_only_dark.json
+python scripts/train.py --config configs/diagnostic/odernn_morph_only_dark.json
+python scripts/train.py --config configs/diagnostic/odernn_image_only_dark.json
+```
+
 ## Reproducibility
 
 To reproduce an experiment:
