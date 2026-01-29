@@ -119,6 +119,22 @@ def eval_one_epoch(
         if use_norm:
             mse_norm_list.append(mse_norm)
 
+    if not all_y:
+        if target_names is None:
+            target_names = ["Dry_Weight", "Chl_Per_Cell", "Fv_Fm", "Oxygen_Rate"]
+        print("[Warn] eval_one_epoch received an empty dataloader; returning NaN metrics.")
+        empty_metrics: Dict[str, float] = {
+            "mse_raw": float("inf"),
+            "mse_norm": float("inf"),
+        }
+        for name in target_names:
+            empty_metrics[f"mae_raw_{name}"] = float("nan")
+            empty_metrics[f"rmse_raw_{name}"] = float("nan")
+            empty_metrics[f"r2_{name}"] = float("nan")
+        if return_preds:
+            return empty_metrics, np.empty((0, 4)), np.empty((0, 4))
+        return empty_metrics
+
     Y = torch.cat(all_y, dim=0)
     YH = torch.cat(all_yhat, dim=0)
     out = summarize_regression_metrics(
