@@ -93,6 +93,8 @@ class FusionGRUModel(nn.Module):
             self.fusion = nn.Identity()
         elif use_cnn and not use_morph:
             self.fusion = nn.Identity()
+        elif not use_morph and not use_cnn:
+             self.fusion = nn.Identity()
         else:
             raise ValueError(f"Unsupported fusion_type: {fusion_type}")
 
@@ -201,6 +203,8 @@ class FusionLSTMModel(nn.Module):
             self.fusion = nn.Identity()
         elif use_cnn and not use_morph:
             self.fusion = nn.Identity()
+        elif not use_morph and not use_cnn:
+             self.fusion = nn.Identity()
         else:
             raise ValueError(f"Unsupported fusion_type: {fusion_type}")
 
@@ -295,6 +299,8 @@ class StaticMLPBaseline(nn.Module):
             self.fusion = nn.Identity()
         elif use_cnn and not use_morph:
             self.fusion = nn.Identity()
+        elif not use_morph and not use_cnn:
+             self.fusion = nn.Identity()
         else:
             raise ValueError(f"Unsupported fusion_type: {fusion_type}")
 
@@ -379,6 +385,8 @@ class FusionODERNNModel(nn.Module):
             self.fusion = nn.Identity()
         elif use_cnn and not use_morph:
             self.fusion = nn.Identity()
+        elif not use_morph and not use_cnn:
+             self.fusion = nn.Identity()
         else:
             raise ValueError(f"Unsupported fusion_type: {fusion_type}")
         input_dim = fusion_dim + time_dim
