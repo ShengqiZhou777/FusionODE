@@ -63,8 +63,11 @@ class FusionGRUModel(nn.Module):
         time_scale: float = 72.0,
     ):
         super().__init__()
-        if not use_morph and not use_cnn:
-            raise ValueError("At least one of use_morph/use_cnn must be True.")
+        time_dim = 0
+        if use_time:
+            time_dim = 1 if time_features == "absolute" else 2
+        if not use_morph and not use_cnn and time_dim == 0:
+            raise ValueError("At least one of use_morph/use_cnn must be True when time features are disabled.")
         self.use_morph = use_morph
         self.use_cnn = use_cnn
         self.use_time = use_time
@@ -92,10 +95,6 @@ class FusionGRUModel(nn.Module):
             self.fusion = nn.Identity()
         else:
             raise ValueError(f"Unsupported fusion_type: {fusion_type}")
-
-        time_dim = 0
-        if self.use_time:
-            time_dim = 1 if time_features == "absolute" else 2
 
         # batch_first=True => input [B,W,F]
         self.gru = nn.GRU(
@@ -126,8 +125,10 @@ class FusionGRUModel(nn.Module):
             x = self.fusion(z_m, z_c)                 # [B,W,Z]
         elif self.use_morph:
             x = z_m
-        else:
+        elif self.use_cnn:
             x = z_c
+        else:
+            x = torch.zeros((*times.shape, 0), device=times.device, dtype=times.dtype)
 
         if self.use_time:
             t_feat = _build_time_features(times, self.time_scale, self.time_features)
@@ -170,8 +171,11 @@ class FusionLSTMModel(nn.Module):
         time_scale: float = 72.0,
     ):
         super().__init__()
-        if not use_morph and not use_cnn:
-            raise ValueError("At least one of use_morph/use_cnn must be True.")
+        time_dim = 0
+        if use_time:
+            time_dim = 1 if time_features == "absolute" else 2
+        if not use_morph and not use_cnn and time_dim == 0:
+            raise ValueError("At least one of use_morph/use_cnn must be True when time features are disabled.")
         self.use_morph = use_morph
         self.use_cnn = use_cnn
         self.use_time = use_time
@@ -200,10 +204,6 @@ class FusionLSTMModel(nn.Module):
         else:
             raise ValueError(f"Unsupported fusion_type: {fusion_type}")
 
-        time_dim = 0
-        if self.use_time:
-            time_dim = 1 if time_features == "absolute" else 2
-
         self.lstm = nn.LSTM(
             input_size=fusion_dim + time_dim,
             hidden_size=rnn_hidden,
@@ -225,8 +225,10 @@ class FusionLSTMModel(nn.Module):
             x = self.fusion(z_m, z_c)                 # [B,W,Z]
         elif self.use_morph:
             x = z_m
-        else:
+        elif self.use_cnn:
             x = z_c
+        else:
+            x = torch.zeros((*times.shape, 0), device=times.device, dtype=times.dtype)
 
         if self.use_time:
             t_feat = _build_time_features(times, self.time_scale, self.time_features)
@@ -263,8 +265,11 @@ class StaticMLPBaseline(nn.Module):
         hidden_dim: int = 128,
     ):
         super().__init__()
-        if not use_morph and not use_cnn:
-            raise ValueError("At least one of use_morph/use_cnn must be True.")
+        time_dim = 0
+        if use_time:
+            time_dim = 1 if time_features == "absolute" else 2
+        if not use_morph and not use_cnn and time_dim == 0:
+            raise ValueError("At least one of use_morph/use_cnn must be True when time features are disabled.")
         self.use_morph = use_morph
         self.use_cnn = use_cnn
         self.use_time = use_time
@@ -293,10 +298,6 @@ class StaticMLPBaseline(nn.Module):
         else:
             raise ValueError(f"Unsupported fusion_type: {fusion_type}")
 
-        time_dim = 0
-        if self.use_time:
-            time_dim = 1 if time_features == "absolute" else 2
-
         self.decoder = RegressionHead(in_dim=fusion_dim + time_dim, out_dim=4, hidden=hidden_dim, dropout=dropout)
 
     def forward(self, batch: dict) -> torch.Tensor:
@@ -311,8 +312,10 @@ class StaticMLPBaseline(nn.Module):
             x = self.fusion(z_m, z_c)
         elif self.use_morph:
             x = z_m
-        else:
+        elif self.use_cnn:
             x = z_c
+        else:
+            x = torch.zeros((*times.shape, 0), device=times.device, dtype=times.dtype)
 
         x_last = x[:, -1]
         if self.use_time:
@@ -341,12 +344,21 @@ class FusionODERNNModel(nn.Module):
         fusion_type: str = "cross_attention",
         attn_dim: int = 64,
         attn_heads: int = 4,
+        use_time: bool = True,
+        time_features: str = "absolute",
+        time_scale: float = 72.0,
     ):
         super().__init__()
-        if not use_morph and not use_cnn:
-            raise ValueError("At least one of use_morph/use_cnn must be True.")
+        time_dim = 0
+        if use_time:
+            time_dim = 1 if time_features == "absolute" else 2
+        if not use_morph and not use_cnn and time_dim == 0:
+            raise ValueError("At least one of use_morph/use_cnn must be True when time features are disabled.")
         self.use_morph = use_morph
         self.use_cnn = use_cnn
+        self.use_time = use_time
+        self.time_features = time_features
+        self.time_scale = time_scale
         self.morph_encoder = MorphMLP(in_dim=morph_dim, out_dim=z_morph, dropout=dropout)
         self.cnn_encoder = AttentionMIL(in_dim=cnn_dim, out_dim=z_cnn, attn_hidden=128, gated=True)
 
@@ -369,8 +381,9 @@ class FusionODERNNModel(nn.Module):
             self.fusion = nn.Identity()
         else:
             raise ValueError(f"Unsupported fusion_type: {fusion_type}")
+        input_dim = fusion_dim + time_dim
         self.temporal = ODERNN(
-            input_dim=fusion_dim,
+            input_dim=input_dim,
             hidden_dim=hidden_dim,
             ode_hidden=ode_hidden,
             dropout=0.0,
@@ -381,15 +394,22 @@ class FusionODERNNModel(nn.Module):
         morph = batch["morph"]        # [B,W,Dm]
         bags = batch["bags"]          # [B,W,N,Dc]
         mask = batch["bag_mask"]      # [B,W,N]
-        times = batch["times"] / 72.0       # [B,W]
+        times_raw = batch["times"]       # [B,W]
+        times = times_raw / self.time_scale
         z_m = self.morph_encoder(morph) if self.use_morph else None  # [B,W,Zm]
         z_c = self.cnn_encoder(bags, mask) if self.use_cnn else None # [B,W,Zc]
         if self.use_morph and self.use_cnn:
             x = self.fusion(z_m, z_c)             # [B,W,F]
         elif self.use_morph:
             x = z_m
-        else:
+        elif self.use_cnn:
             x = z_c
+        else:
+            x = torch.zeros((*times.shape, 0), device=times.device, dtype=times.dtype)
+
+        if self.use_time:
+            t_feat = _build_time_features(times_raw, self.time_scale, self.time_features)
+            x = torch.cat([x, t_feat], dim=-1)
 
         h_last = self.temporal(x, times)       # [B,H]
         y_hat = self.decoder(h_last)           # [B,4]

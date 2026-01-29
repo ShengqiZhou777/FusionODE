@@ -311,6 +311,9 @@ def _build_model(
             fusion_type=fusion_type,
             attn_dim=model_cfg.get("attn_dim", 64),
             attn_heads=model_cfg.get("attn_heads", 4),
+            use_time=time_features != "none",
+            time_features=time_features,
+            time_scale=time_scale,
         )
     if model_type == "gru":
         return FusionGRUModel(
@@ -480,6 +483,9 @@ def _run_final_test(
     generator: torch.Generator,
     mc_test_runs: int,
     mc_test_base_seed: int,
+    split_strategy: str,
+    target_shuffle: str,
+    split_seed: int,
     run_dir: str,
 ) -> None:
     if len(ds_test) <= 0:
@@ -530,8 +536,10 @@ def _run_final_test(
             df_cnn, df_morph, df_tgt,
             n_cells_per_bag=n_cells_per_bag,
             split_ratios=(0.7, 0.15, 0.15),
+            split_strategy=split_strategy,
+            target_shuffle=target_shuffle,
             seed=0,
-            split_seed=0,
+            split_seed=split_seed,
             bag_seed=mc_test_base_seed + run_idx,
             sample_with_replacement=True,
         )
@@ -649,14 +657,25 @@ def main() -> None:
 
     df_cnn, df_morph, df_tgt = _load_dataframes(root, data_cfg)
 
-    print(f"[Build] Splitting cells 70% Train / 15% Val / 15% Test per timepoint...")
+    split_strategy = data_cfg.get("split_strategy", "cell")
+    target_shuffle = data_cfg.get("target_shuffle", "none")
+    split_seed = int(data_cfg.get("split_seed", 0))
+    bag_seed = int(data_cfg.get("bag_seed", 0))
+    if split_strategy == "time":
+        print("[Build] Splitting by timepoints 70% Train / 15% Val / 15% Test (extrapolation)...")
+    else:
+        print("[Build] Splitting cells 70% Train / 15% Val / 15% Test per timepoint...")
+    if target_shuffle != "none":
+        print(f"[Build] Target shuffle enabled: {target_shuffle}")
     traj_train, traj_val, traj_test = build_trajectories(
         df_cnn, df_morph, df_tgt,
         n_cells_per_bag=train_cfg.get("n_cells_per_bag", 500),
         split_ratios=(0.7, 0.15, 0.15),
+        split_strategy=split_strategy,
+        target_shuffle=target_shuffle,
         seed=0,
-        split_seed=0,
-        bag_seed=0,
+        split_seed=split_seed,
+        bag_seed=bag_seed,
         sample_with_replacement=True,
     )
 
@@ -759,6 +778,9 @@ def main() -> None:
         generator=generator,
         mc_test_runs=eval_cfg.get("mc_test_runs", 20),
         mc_test_base_seed=eval_cfg.get("mc_test_base_seed", 1000),
+        split_strategy=split_strategy,
+        target_shuffle=target_shuffle,
+        split_seed=split_seed,
         run_dir=run_dir,
     )
 
