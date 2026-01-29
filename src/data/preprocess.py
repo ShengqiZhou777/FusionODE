@@ -146,11 +146,11 @@ def build_trajectories(
                 df_c_sub = df_c[df_c["cell_id"].isin(cell_set)]
 
                 # Subsample cell_ids if needed (shared between Morph and CNN)
-                available_ids = np.intersect1d(
-                    df_m_sub["cell_id"].to_numpy(),
-                    df_c_sub["cell_id"].to_numpy(),
-                    assume_unique=False,
-                )
+                # Subsample cell_ids if needed (shared between Morph and CNN)
+                # Optimization: Use set intersection instead of np.intersect1d to avoid repeated sorting
+                ids_m = set(df_m_sub["cell_id"])
+                ids_c = set(df_c_sub["cell_id"])
+                available_ids = np.array(list(ids_m.intersection(ids_c)))
                 n_current = len(available_ids)
                 if n_current == 0:
                     continue

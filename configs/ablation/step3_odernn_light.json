@@ -1,0 +1,39 @@
+{
+    "run": {
+        "name": "ablation_step3_odernn_light"
+    },
+    "data": {
+        "cnn_path": "data/cnn_features_pca.csv",
+        "morph_path": "data/morph_features.csv",
+        "target_path": "data/result.csv"
+    },
+    "model": {
+        "type": "odernn",
+        "fusion_type": "cross_attention",
+        "use_morph": true,
+        "use_cnn": true,
+        "hidden_dim": 128,
+        "ode_hidden": 128,
+        "attn_dim": 64,
+        "attn_heads": 4,
+        "dropout": 0.0
+    },
+    "train": {
+        "target_condition": "Light",
+        "window_size": 4,
+        "batch_size": 8,
+        "epochs": 200,
+        "lr": 0.01,
+        "weight_decay": 0.0001,
+        "grad_clip": 1.0,
+        "patience": 20,
+        "use_scheduler": true,
+        "scheduler_factor": 0.5,
+        "scheduler_patience": 5,
+        "min_lr": 1e-6
+    },
+    "eval": {
+        "mc_test_runs": 20,
+        "mc_test_base_seed": 42
+    }
+}

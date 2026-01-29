@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 from datetime import datetime
+
+# Add project root to path
+root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(root)
 
 import numpy as np
 import torch
@@ -217,6 +222,10 @@ def main() -> None:
     os.makedirs(run_dir, exist_ok=True)
     torch.save({"y_mean": y_mean, "y_std": y_std}, os.path.join(run_dir, "scaler.pt"))
 
+    # Move scaler to device for training
+    y_mean = y_mean.to(device)
+    y_std = y_std.to(device)
+
     dl_train = DataLoader(
         ds_train,
         batch_size=batch_size,
@@ -290,6 +299,8 @@ def main() -> None:
 
     target_names = ["Dry_Weight", "Chl_Per_Cell", "Fv_Fm", "Oxygen_Rate"]
 
+    best_val_loss = float("inf")
+    
     for ep in range(epochs):
         tr = train_one_epoch_masked(
             model,
@@ -315,8 +326,20 @@ def main() -> None:
             f"Epoch {ep:03d} | Train Loss={tr['mse_norm']:.4f} | "
             f"Val Loss={va['mse_norm']:.4f} Val MSE={va['mse_raw']:.4f}"
         )
+        
+        # Save Best Model
+        if va["mse_norm"] < best_val_loss:
+            best_val_loss = va["mse_norm"]
+            torch.save(model.state_dict(), os.path.join(run_dir, "best_masked_model.pt"))
+            # print(f"  [Saved Best Model] {best_val_loss:.4f}")
 
     if len(ds_test) > 0:
+        # Load best model for testing
+        best_path = os.path.join(run_dir, "best_masked_model.pt")
+        if os.path.exists(best_path):
+            print(f"Loading best model from {best_path}")
+            model.load_state_dict(torch.load(best_path, map_location=device))
+
         dl_test = DataLoader(
             ds_test,
             batch_size=batch_size,
@@ -339,6 +362,41 @@ def main() -> None:
             f"[Test Result] mse_raw={test_metrics['mse_raw']:.6f} | "
             f"mse_norm={test_metrics['mse_norm']:.6f}"
         )
+        
+        # Save Predictions to CSV
+        # We need to run one more pass to get arrays, or modify eval to return them
+        # Re-running eval (it's fast) to extract arrays
+        model.eval()
+        all_preds = []
+        all_trues = []
+        
+        with torch.no_grad():
+            for batch in dl_test:
+                batch = apply_time_mask(batch, g, args.mask_prob_eval)
+                batch = to_device(batch, device)
+                y_hat = model(batch)
+                y = batch["y"]
+                
+                # Denormalize
+                y_hat_raw = (y_hat * y_std) + y_mean
+                y_raw = (y * y_std) + y_mean
+                
+                all_preds.append(y_hat_raw.cpu().numpy())
+                all_trues.append(y_raw.cpu().numpy())
+                
+        preds_arr = np.concatenate(all_preds, axis=0) # [N, 4]
+        true_arr = np.concatenate(all_trues, axis=0)  # [N, 4]
+        
+        import pandas as pd
+        data = {}
+        for i, tgt in enumerate(target_names):
+            data[f"True_{tgt}"] = true_arr[:, i]
+            data[f"Pred_{tgt}"] = preds_arr[:, i]
+            
+        df_res = pd.DataFrame(data)
+        csv_path = os.path.join(run_dir, "test_predictions_masked.csv")
+        df_res.to_csv(csv_path, index=False)
+        print(f"Saved test predictions to {csv_path}")
 
 
 if __name__ == "__main__":

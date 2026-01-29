@@ -260,6 +260,7 @@ class StaticMLPBaseline(nn.Module):
         use_time: bool = True,
         time_features: str = "absolute",
         time_scale: float = 72.0,
+        hidden_dim: int = 128,
     ):
         super().__init__()
         if not use_morph and not use_cnn:
@@ -296,7 +297,7 @@ class StaticMLPBaseline(nn.Module):
         if self.use_time:
             time_dim = 1 if time_features == "absolute" else 2
 
-        self.decoder = RegressionHead(in_dim=fusion_dim + time_dim, out_dim=4, hidden=128, dropout=dropout)
+        self.decoder = RegressionHead(in_dim=fusion_dim + time_dim, out_dim=4, hidden=hidden_dim, dropout=dropout)
 
     def forward(self, batch: dict) -> torch.Tensor:
         morph = batch["morph"]
