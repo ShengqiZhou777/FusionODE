@@ -402,7 +402,8 @@ class FusionODERNNModel(nn.Module):
         morph = batch["morph"]        # [B,W,Dm]
         bags = batch["bags"]          # [B,W,N,Dc]
         mask = batch["bag_mask"]      # [B,W,N]
-        times = batch["times"] / 72.0       # [B,W]
+        times_raw = batch["times"]       # [B,W]
+        times = times_raw / self.time_scale
         z_m = self.morph_encoder(morph) if self.use_morph else None  # [B,W,Zm]
         z_c = self.cnn_encoder(bags, mask) if self.use_cnn else None # [B,W,Zc]
         if self.use_morph and self.use_cnn:
@@ -415,7 +416,7 @@ class FusionODERNNModel(nn.Module):
             x = torch.zeros((*times.shape, 0), device=times.device, dtype=times.dtype)
 
         if self.use_time:
-            t_feat = _build_time_features(times, self.time_scale, self.time_features)
+            t_feat = _build_time_features(times_raw, self.time_scale, self.time_features)
             x = torch.cat([x, t_feat], dim=-1)
 
         h_last = self.temporal(x, times)       # [B,H]
