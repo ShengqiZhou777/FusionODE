@@ -59,6 +59,7 @@ def build_trajectories(
     n_cells_per_bag: int = 500,
     split_ratios: tuple[float, float, float] = (0.7, 0.15, 0.15),
     split_strategy: Literal["cell", "time"] = "cell",
+    window_size: int | None = None,
     target_shuffle: Literal["none", "within_condition"] = "none",
     seed: int = 0,
     split_seed: int | None = None,
@@ -71,9 +72,74 @@ def build_trajectories(
       split_seed: 控制 split 的随机种子（不设则回退到 seed）
       bag_seed: 控制 bag 采样的随机种子（不设则回退到 seed）
       split_strategy: "cell"=同一时间点内按细胞划分, "time"=按时间点整体划分
+      window_size: split_strategy="time" 时用于窗口级别切分的时间窗长度
       target_shuffle: "none"=不打乱, "within_condition"=在同一condition内打乱时间点的target
     returns: (traj_train, traj_val, traj_test)
     """
+    def _allocate_window_counts(n_windows: int, ratios: tuple[float, float, float]) -> tuple[int, int, int]:
+        if n_windows <= 0:
+            return 0, 0, 0
+
+        counts = [int(n_windows * r) for r in ratios]
+        if counts[0] == 0:
+            counts[0] = 1
+        if n_windows >= 2 and counts[1] == 0:
+            counts[1] = 1
+        if n_windows >= 3 and counts[2] == 0:
+            counts[2] = 1
+
+        total = sum(counts)
+        while total > n_windows:
+            for idx in [0, 1, 2]:
+                if total <= n_windows:
+                    break
+                min_allowed = 0
+                if idx == 0 and n_windows >= 1:
+                    min_allowed = 1
+                if idx == 1 and n_windows >= 2:
+                    min_allowed = 1
+                if idx == 2 and n_windows >= 3:
+                    min_allowed = 1
+                if counts[idx] > min_allowed:
+                    counts[idx] -= 1
+                    total -= 1
+        while total < n_windows:
+            counts[0] += 1
+            total += 1
+
+        return counts[0], counts[1], counts[2]
+
+    def _time_split_with_windows(
+        ordered_keys: list[tuple[str, float]],
+        ratios: tuple[float, float, float],
+        win_size: int,
+    ) -> dict[tuple[str, float], list[str]]:
+        n_total = len(ordered_keys)
+        n_windows = n_total - win_size + 1
+        if n_windows <= 0:
+            return {}
+
+        n_train_w, n_val_w, n_test_w = _allocate_window_counts(n_windows, ratios)
+        split_ranges = {
+            "train": (0, n_train_w - 1) if n_train_w > 0 else None,
+            "val": (n_train_w, n_train_w + n_val_w - 1) if n_val_w > 0 else None,
+            "test": (n_train_w + n_val_w, n_windows - 1) if n_test_w > 0 else None,
+        }
+
+        time_split: dict[tuple[str, float], list[str]] = {}
+        for split_name, window_range in split_ranges.items():
+            if window_range is None:
+                continue
+            w_start, w_end = window_range
+            t_start = w_start
+            t_end = min(w_end + win_size - 1, n_total - 1)
+            for idx in range(t_start, t_end + 1):
+                key = ordered_keys[idx]
+                time_split.setdefault(key, [])
+                if split_name not in time_split[key]:
+                    time_split[key].append(split_name)
+
+        return time_split
     # --- 找列 ---
     cnn_feat_cols = [c for c in df_cnn.columns if c.startswith("cnn_pca_")]
     if len(cnn_feat_cols) == 0:
@@ -127,20 +193,24 @@ def build_trajectories(
         }
 
         if split_strategy == "time":
-            n_total = len(cond_keys)
-            n_train = int(n_total * split_ratios[0])
-            n_val = int(n_total * split_ratios[1])
-            train_times = set(cond_keys[:n_train])
-            val_times = set(cond_keys[n_train : n_train + n_val])
-            test_times = set(cond_keys[n_train + n_val :])
+            time_split: dict[tuple[str, float], list[str]] = {}
+            if window_size is not None and window_size > 1:
+                time_split = _time_split_with_windows(cond_keys, split_ratios, window_size)
 
-            time_split = {}
-            for key in train_times:
-                time_split[key] = "train"
-            for key in val_times:
-                time_split[key] = "val"
-            for key in test_times:
-                time_split[key] = "test"
+            if not time_split:
+                n_total = len(cond_keys)
+                n_train = int(n_total * split_ratios[0])
+                n_val = int(n_total * split_ratios[1])
+                train_times = set(cond_keys[:n_train])
+                val_times = set(cond_keys[n_train : n_train + n_val])
+                test_times = set(cond_keys[n_train + n_val :])
+
+                for key in train_times:
+                    time_split[key] = ["train"]
+                for key in val_times:
+                    time_split[key] = ["val"]
+                for key in test_times:
+                    time_split[key] = ["test"]
         else:
             time_split = {}
 
@@ -153,10 +223,10 @@ def build_trajectories(
                 continue
 
             if split_strategy == "time":
-                split_name = time_split.get((c, t))
-                if split_name is None:
+                split_names = time_split.get((c, t))
+                if not split_names:
                     continue
-                split_assignments = [(split_name, set(common_cells))]
+                split_assignments = [(name, set(common_cells)) for name in split_names]
             else:
                 rng_split = _stable_rng(split_seed, c, t, "split")
                 rng_split.shuffle(common_cells)
