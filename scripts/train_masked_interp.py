@@ -44,6 +44,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--attn-heads", type=int, default=4)
     parser.add_argument("--mask-prob-train", type=float, default=0.5)
     parser.add_argument("--mask-prob-eval", type=float, default=0.0)
+    parser.add_argument("--fixed-mask-index", type=int, default=-1, help="If >= 0, always mask this index (0-based) in the window. Overrides mask-prob.")
+    parser.add_argument("--geo-only", action="store_true", help="Only use geometric features for morphology.")
+    parser.add_argument("--patience", type=int, default=30, help="Early stopping patience")
     parser.add_argument("--run-name", default=None)
     return parser.parse_args()
 
@@ -68,12 +71,27 @@ def compute_target_scaler(ds_subset: Subset) -> tuple[torch.Tensor, torch.Tensor
     return y_mean, y_std
 
 
-def apply_time_mask(batch: dict, rng: torch.Generator, prob: float) -> dict:
+def apply_time_mask(batch: dict, rng: torch.Generator, prob: float, fixed_mask_idx: int = -1) -> dict:
+    """
+    Apply masking to the input batch.
+    If fixed_mask_idx >= 0, always mask that specific timepoint (if within bounds).
+    Otherwise, use probabilistic random masking.
+    """
+    W = batch["times"].shape[1]
+
+    # Fixed index masking strategy
+    if fixed_mask_idx >= 0:
+        if fixed_mask_idx < W:
+            batch["morph"][:, fixed_mask_idx] = 0.0
+            batch["bags"][:, fixed_mask_idx] = 0.0
+            batch["bag_mask"][:, fixed_mask_idx] = False
+        return batch
+
+    # Original probabilistic random masking
     if prob <= 0:
         return batch
     if torch.rand(1, generator=rng).item() > prob:
         return batch
-    W = batch["times"].shape[1]
     if W <= 1:
         return batch
     t = int(torch.randint(0, W, (1,), generator=rng).item())
@@ -97,6 +115,7 @@ def eval_one_epoch_masked(
     device: torch.device,
     rng: torch.Generator,
     mask_prob: float,
+    fixed_mask_idx: int,
     y_mean: torch.Tensor,
     y_std: torch.Tensor,
     target_names: list[str],
@@ -136,6 +155,7 @@ def train_one_epoch_masked(
     device: torch.device,
     rng: torch.Generator,
     mask_prob: float,
+    fixed_mask_idx: int,
     y_mean: torch.Tensor,
     y_std: torch.Tensor,
     grad_clip: float = 1.0,
@@ -192,6 +212,12 @@ def main() -> None:
     df_morph = read_morph(path_morph)
     df_tgt = read_targets(path_tgt)
 
+    if args.geo_only:
+        morph_cols = ["area", "perimeter", "circularity", "aspect_ratio", "solidity", "major_axis", "minor_axis", "eccentricity"]
+        print(f"[Morph Feature Filter] Using only Geometric Features: {morph_cols}")
+    else:
+        morph_cols = None
+
     traj_train, traj_val, traj_test = build_trajectories(
         df_cnn,
         df_morph,
@@ -202,6 +228,7 @@ def main() -> None:
         split_seed=0,
         bag_seed=0,
         sample_with_replacement=True,
+        morph_cols_to_use=morph_cols,
     )
 
     traj_train = {k: v for k, v in traj_train.items() if k == target_condition}
@@ -296,10 +323,19 @@ def main() -> None:
         raise ValueError(f"Unsupported model_type: {model_type}")
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode="min",
+        factor=0.5,
+        patience=10,
+        min_lr=1e-6,
+    )
 
     target_names = ["Dry_Weight", "Chl_Per_Cell", "Fv_Fm", "Oxygen_Rate"]
 
     best_val_loss = float("inf")
+    early_stop_counter = 0
     
     for ep in range(epochs):
         tr = train_one_epoch_masked(
@@ -309,6 +345,7 @@ def main() -> None:
             device,
             g,
             args.mask_prob_train,
+            args.fixed_mask_index,
             y_mean,
             y_std,
         )
@@ -318,12 +355,16 @@ def main() -> None:
             device,
             g,
             args.mask_prob_eval,
+            args.fixed_mask_index,
             y_mean,
             y_std,
             target_names,
         )
+        scheduler.step(va["mse_norm"])
+        cur_lr = optimizer.param_groups[0]["lr"]
+
         print(
-            f"Epoch {ep:03d} | Train Loss={tr['mse_norm']:.4f} | "
+            f"Epoch {ep:03d} | lr={cur_lr:.2e} | Train Loss={tr['mse_norm']:.4f} | "
             f"Val Loss={va['mse_norm']:.4f} Val MSE={va['mse_raw']:.4f}"
         )
         
@@ -332,6 +373,12 @@ def main() -> None:
             best_val_loss = va["mse_norm"]
             torch.save(model.state_dict(), os.path.join(run_dir, "best_masked_model.pt"))
             # print(f"  [Saved Best Model] {best_val_loss:.4f}")
+            early_stop_counter = 0
+        else:
+            early_stop_counter += 1
+            if early_stop_counter >= args.patience:
+                print(f"Early stopping triggered after {ep+1} epochs.")
+                break
 
     if len(ds_test) > 0:
         # Load best model for testing
@@ -354,6 +401,7 @@ def main() -> None:
             device,
             g,
             args.mask_prob_eval,
+            args.fixed_mask_index,
             y_mean,
             y_std,
             target_names,
@@ -372,7 +420,7 @@ def main() -> None:
         
         with torch.no_grad():
             for batch in dl_test:
-                batch = apply_time_mask(batch, g, args.mask_prob_eval)
+                batch = apply_time_mask(batch, g, args.mask_prob_eval, fixed_mask_idx=args.fixed_mask_index)
                 batch = to_device(batch, device)
                 y_hat = model(batch)
                 y = batch["y"]

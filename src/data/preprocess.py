@@ -65,6 +65,7 @@ def build_trajectories(
     split_seed: int | None = None,
     bag_seed: int | None = None,
     sample_with_replacement: bool = True,
+    morph_cols_to_use: list[str] | None = None,
 ) -> tuple[dict, dict, dict]:
     """
     params:
@@ -147,8 +148,11 @@ def build_trajectories(
 
     non_feat = {"time", "condition", "cell_id"}
     morph_feat_cols = [c for c in df_morph.columns if c not in non_feat]
+    if morph_cols_to_use is not None:
+        morph_feat_cols = [c for c in morph_feat_cols if c in morph_cols_to_use]
+    
     if len(morph_feat_cols) == 0:
-        raise ValueError("morph_features.csv 中找不到形态学特征列")
+        raise ValueError("morph_features.csv 中找不到形态学特征列 (或被过滤后为空)")
 
     target_cols = ["Dry_Weight", "Chl_Per_Cell", "Fv_Fm", "Oxygen_Rate"]
     for c in target_cols:
