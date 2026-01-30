@@ -77,6 +77,41 @@ python scripts/train.py --config configs/diagnostic/odernn_image_only_dark.json
 
 ### Extrapolation split + target shuffle diagnostics
 
+## Minimal next-step experiment plan (paper-ready sanity checks)
+
+Given the strong time-only performance in diagnostics, the minimum-cost next steps are:
+
+1) **Time split**: force true extrapolation by splitting on timepoints.
+2) **Target shuffle**: shuffle targets within each condition to test time leakage.
+3) **LOOTO**: leave-one-timepoint-out evaluation to quantify robustness.
+
+Suggested runs (replace config paths if your variants differ):
+
+```bash
+# GRU time-only: time split (extrapolation)
+python scripts/train.py --config configs/diagnostic/gru_time_only_dark.json \
+  --set data.split_strategy=time
+
+# GRU time-only: target shuffle (leakage check)
+python scripts/train.py --config configs/diagnostic/gru_time_only_dark.json \
+  --set data.target_shuffle=within_condition
+
+# ODE-RNN morph-only: time split (check if morph is leaking time/condition)
+python scripts/train.py --config configs/diagnostic/odernn_morph_only_dark.json \
+  --set data.split_strategy=time
+
+# ODE-RNN morph-only: target shuffle (leakage check)
+python scripts/train.py --config configs/diagnostic/odernn_morph_only_dark.json \
+  --set data.target_shuffle=within_condition
+```
+
+Optional LOOTO (add to any of the runs above):
+
+```bash
+python scripts/train.py --config configs/diagnostic/gru_time_only_dark.json \
+  --set eval.eval_looto=true
+```
+
 To evaluate true forecasting (extrapolation), split by timepoints instead of cells:
 
 ```bash
