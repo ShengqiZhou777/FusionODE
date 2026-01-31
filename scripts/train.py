@@ -1,6 +1,7 @@
 from __future__ import annotations
 import argparse
 import csv
+from functools import partial
 from datetime import datetime
 import json
 import os
@@ -20,13 +21,12 @@ from src.data.io import read_cnn, read_morph, read_targets
 from src.data.preprocess import build_trajectories
 from src.data.dataset import SlidingWindowDataset
 from src.data.collate import collate_windows
-
-from src.models.full_model import (
-    FusionGRUModel,
-    FusionLSTMModel,
-    FusionODERNNModel,
-    StaticMLPBaseline,
-)
+from src.data.loader import read_dataframes, create_datasets, create_loaders
+from src.train.utils import compute_target_scaler
+###################################################################
+# Imports from src.models.factory replace local _build_model logic
+###################################################################
+from src.models.factory import create_model
 from src.train.engine import train_one_epoch, eval_one_epoch
 from src.utils.seed import set_seed
 
@@ -34,21 +34,16 @@ from src.utils.seed import set_seed
 TARGET_NAMES = ["Dry_Weight", "Chl_Per_Cell", "Fv_Fm", "Oxygen_Rate"]
 
 
-def compute_target_scaler(ds_subset: Subset) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    计算 train 集 target 的 mean/std（按 4 维分别算）
-    返回: y_mean [4], y_std [4]  (torch.float32)
-    """
-    ys = []
-    for i in range(len(ds_subset)):
-        item = ds_subset[i]
-        ys.append(item["y"].float().unsqueeze(0))  # [1,4]
-    Y = torch.cat(ys, dim=0)  # [N,4]
-    y_mean = Y.mean(dim=0)
-    y_std = Y.std(dim=0, unbiased=False)
-    min_std = 0.05 * y_std.max()   # 也可以固定成 0.05 或 0.1
-    y_std = y_std.clamp(min=min_std).clamp(min=1e-6)
-    return y_mean, y_std
+
+def print_target_stats(metrics: dict, prefix: str = ""):
+    parts = []
+    for name in TARGET_NAMES:
+        key = f"rmse_raw_{name}"
+        if key in metrics:
+            parts.append(f"{name}={metrics[key]:.3f}")
+    print(f"{prefix}RMSE: {', '.join(parts)}")
+
+# compute_target_scaler imported from src.train.utils
 
 
 def build_run_dir(
@@ -80,6 +75,23 @@ def parse_args() -> argparse.Namespace:
         help="Override config entries, e.g. --set train.lr=1e-4 (repeatable).",
     )
     return parser.parse_args()
+
+
+
+def apply_time_mask(batch: dict, fixed_mask_idx: int = -1) -> dict:
+    """
+    Apply masking to the input batch.
+    If fixed_mask_idx >= 0, always mask that specific timepoint (if within bounds).
+    """
+    if fixed_mask_idx < 0:
+        return batch
+        
+    W = batch["times"].shape[1]
+    if fixed_mask_idx < W:
+        batch["morph"][:, fixed_mask_idx] = 0.0
+        batch["bags"][:, fixed_mask_idx] = 0.0
+        batch["bag_mask"][:, fixed_mask_idx] = False
+    return batch
 
 
 def _load_yaml(path: str) -> dict:
@@ -157,16 +169,7 @@ def _inspect_split_overlap(traj_train: dict, traj_val: dict, traj_test: dict) ->
                     print(f"[Warn] Train/Test leakage at {cond} index {idx}: {len(overlap)} shared cells")
 
 
-def _prepare_overfit_subset(ds_train: SlidingWindowDataset, ds_val: SlidingWindowDataset, overfit_n: int):
-    """
-    Optional overfit sanity check: train/val on the same tiny subset.
-    Useful to verify the baseline can fit small data without logic bugs.
-    """
-    if overfit_n <= 0:
-        return ds_train, ds_val
-    subset_n = min(overfit_n, len(ds_train))
-    subset_indices = list(range(subset_n))
-    return Subset(ds_train, subset_indices), Subset(ds_train, subset_indices)
+# _inspect_split_overlap logic kept local as it's specific analysis
 
 
 def _build_time_scale(traj_train: dict, target_condition: str, time_scale: float | None) -> float:
@@ -232,142 +235,17 @@ def _eval_leave_one_timepoint(
     print(f"[LOOTO] Saved metrics to {looto_path}")
 
 
-def _load_dataframes(root: str, data_cfg: Mapping[str, Any]):
-    path_cnn = os.path.join(root, "data", "cnn_features_pca.csv")
-    path_morph = os.path.join(root, "data", "morph_features.csv")
-    path_tgt = os.path.join(root, "data", "result.csv")
-    df_cnn = read_cnn(data_cfg.get("cnn_path", path_cnn))
-    df_morph = read_morph(data_cfg.get("morph_path", path_morph))
-    df_tgt = read_targets(data_cfg.get("target_path", path_tgt))
-    return df_cnn, df_morph, df_tgt
+# _load_dataframes replaced by read_dataframes from src.data.loader
 
 
 def _filter_condition(traj: dict, target_condition: str) -> dict:
     return {k: v for k, v in traj.items() if k == target_condition}
 
 
-def _build_datasets(
-    traj_train: dict,
-    traj_val: dict,
-    traj_test: dict,
-    window_size: int,
-    predict_last: bool,
-    overfit_n: int,
-) -> tuple[SlidingWindowDataset, SlidingWindowDataset, SlidingWindowDataset]:
-    ds_train = SlidingWindowDataset(traj_train, window_size=window_size, predict_last=predict_last)
-    ds_val = SlidingWindowDataset(traj_val, window_size=window_size, predict_last=predict_last)
-    ds_test = SlidingWindowDataset(traj_test, window_size=window_size, predict_last=predict_last)
-    ds_train, ds_val = _prepare_overfit_subset(ds_train, ds_val, overfit_n)
-    return ds_train, ds_val, ds_test
 
 
-def _build_loaders(
-    ds_train: SlidingWindowDataset,
-    ds_val: SlidingWindowDataset,
-    batch_size: int,
-    generator: torch.Generator,
-) -> tuple[DataLoader, DataLoader]:
-    dl_train = DataLoader(
-        ds_train,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=0,
-        collate_fn=collate_windows,
-        generator=generator,
-    )
-    dl_val = DataLoader(
-        ds_val,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=0,
-        collate_fn=collate_windows,
-        generator=generator,
-    )
-    return dl_train, dl_val
 
 
-def _build_model(
-    model_cfg: Mapping[str, Any],
-    model_type: str,
-    fusion_type: str,
-    use_morph: bool,
-    use_cnn: bool,
-    Dm: int,
-    Dc: int,
-    time_scale: float,
-) -> torch.nn.Module:
-    time_features = model_cfg.get("time_features", "absolute+delta")
-    if model_type == "odernn":
-        return FusionODERNNModel(
-            morph_dim=Dm,
-            cnn_dim=Dc,
-            z_morph=64,
-            z_cnn=64,
-            hidden_dim=model_cfg.get("hidden_dim", 128),
-            ode_hidden=model_cfg.get("ode_hidden", 128),
-            dropout=model_cfg.get("dropout", 0.1),
-            use_morph=use_morph,
-            use_cnn=use_cnn,
-            fusion_type=fusion_type,
-            attn_dim=model_cfg.get("attn_dim", 64),
-            attn_heads=model_cfg.get("attn_heads", 4),
-            use_time=time_features != "none",
-            time_features=time_features,
-            time_scale=time_scale,
-        )
-    if model_type == "gru":
-        return FusionGRUModel(
-            morph_dim=Dm,
-            cnn_dim=Dc,
-            z_morph=64,
-            z_cnn=64,
-            rnn_hidden=model_cfg.get("rnn_hidden", 128),
-            rnn_layers=model_cfg.get("rnn_layers", 1),
-            dropout=model_cfg.get("dropout", 0.1),
-            use_morph=use_morph,
-            use_cnn=use_cnn,
-            fusion_type=fusion_type,
-            attn_dim=model_cfg.get("attn_dim", 64),
-            attn_heads=model_cfg.get("attn_heads", 4),
-            use_time=time_features != "none",
-            time_features=time_features,
-            time_scale=time_scale,
-        )
-    if model_type == "lstm":
-        return FusionLSTMModel(
-            morph_dim=Dm,
-            cnn_dim=Dc,
-            z_morph=64,
-            z_cnn=64,
-            rnn_hidden=model_cfg.get("rnn_hidden", 128),
-            rnn_layers=model_cfg.get("rnn_layers", 1),
-            dropout=model_cfg.get("dropout", 0.1),
-            use_morph=use_morph,
-            use_cnn=use_cnn,
-            fusion_type=fusion_type,
-            attn_dim=model_cfg.get("attn_dim", 64),
-            attn_heads=model_cfg.get("attn_heads", 4),
-            use_time=time_features != "none",
-            time_features=time_features,
-            time_scale=time_scale,
-        )
-    if model_type == "static":
-        return StaticMLPBaseline(
-            morph_dim=Dm,
-            cnn_dim=Dc,
-            z_morph=64,
-            z_cnn=64,
-            dropout=model_cfg.get("dropout", 0.1),
-            use_morph=use_morph,
-            use_cnn=use_cnn,
-            fusion_type=fusion_type,
-            attn_dim=model_cfg.get("attn_dim", 64),
-            attn_heads=model_cfg.get("attn_heads", 4),
-            use_time=time_features != "none",
-            time_features=time_features,
-            time_scale=time_scale,
-        )
-    raise ValueError(f"Unsupported model_type: {model_type}")
 
 
 def _build_optimizer(
@@ -409,6 +287,7 @@ def _train_loop(
     run_dir: str,
     model_type: str,
     target_condition: str,
+    batch_transform: Any = None,
 ) -> tuple[str, float, float]:
     epochs = train_cfg.get("epochs", 200)
     patience = train_cfg.get("patience", 15)
@@ -420,7 +299,10 @@ def _train_loop(
 
     target_names = TARGET_NAMES
     for ep in range(epochs):
-        tr = train_one_epoch(model, dl_train, optimizer, device, y_mean=y_mean, y_std=y_std, grad_clip=grad_clip)
+        tr = train_one_epoch(
+            model, dl_train, optimizer, device, y_mean=y_mean, y_std=y_std, 
+            grad_clip=grad_clip, batch_transform=batch_transform
+        )
         va = eval_one_epoch(
             model,
             dl_val,
@@ -428,6 +310,7 @@ def _train_loop(
             y_mean=y_mean,
             y_std=y_std,
             target_names=target_names,
+            batch_transform=batch_transform
         )
 
         if scheduler is not None:
@@ -442,13 +325,7 @@ def _train_loop(
                 {"model": model.state_dict(), "config": {}},
                 ckpt_path,
             )
-            print(
-                "  [New Best] "
-                f"RMSE: Dry_Weight={va['rmse_raw_Dry_Weight']:.3f}, "
-                f"Chl_Per_Cell={va['rmse_raw_Chl_Per_Cell']:.3f}, "
-                f"Fv_Fm={va['rmse_raw_Fv_Fm']:.3f}, "
-                f"Oxygen_Rate={va['rmse_raw_Oxygen_Rate']:.3f}"
-            )
+            print_target_stats(va, prefix="  [New Best] ")
         else:
             bad_epochs += 1
 
@@ -487,6 +364,7 @@ def _run_final_test(
     target_shuffle: str,
     split_seed: int,
     run_dir: str,
+    split_ratios: tuple[float, float, float] = (0.7, 0.15, 0.15),
 ) -> None:
     if len(ds_test) <= 0:
         print("[Test] No test data available (ds_test is empty).")
@@ -535,7 +413,7 @@ def _run_final_test(
         traj_train_mc, traj_val_mc, traj_test_mc = build_trajectories(
             df_cnn, df_morph, df_tgt,
             n_cells_per_bag=n_cells_per_bag,
-            split_ratios=(0.7, 0.15, 0.15),
+            split_ratios=split_ratios,
             split_strategy=split_strategy,
             window_size=window_size,
             target_shuffle=target_shuffle,
@@ -649,6 +527,11 @@ def main() -> None:
     eval_cfg = config.get("eval", {})
     run_cfg = config.get("run", {})
 
+    # Check for raw CNN features flag
+    use_raw_cnn = data_cfg.get("use_raw_cnn", False)
+    if use_raw_cnn:
+        print("[CNN Features] Using RAW ResNet features (512 dim, no PCA)")
+
     model_type = model_cfg.get("type", "odernn")
     fusion_type = model_cfg.get("fusion_type", "cross_attention")
     use_morph = model_cfg.get("use_morph", True)
@@ -656,12 +539,18 @@ def main() -> None:
     target_condition = train_cfg.get("target_condition", "Light")
     print(f"[Target Condition] {target_condition}")
 
-    df_cnn, df_morph, df_tgt = _load_dataframes(root, data_cfg)
+    df_cnn, df_morph, df_tgt = read_dataframes(root, data_cfg, use_raw_cnn=use_raw_cnn)
 
     split_strategy = data_cfg.get("split_strategy", "cell")
     target_shuffle = data_cfg.get("target_shuffle", "none")
     split_seed = int(data_cfg.get("split_seed", 0))
     bag_seed = int(data_cfg.get("bag_seed", 0))
+    
+    n_cells_per_bag = train_cfg.get("n_cells_per_bag", 500)
+    window_size = train_cfg.get("window_size", 4)
+    batch_size = train_cfg.get("batch_size", 8)
+    predict_last = True
+    split_ratios = (0.7, 0.15, 0.15)
     if split_strategy == "time":
         print("[Build] Splitting by timepoints 70% Train / 15% Val / 15% Test (extrapolation)...")
     else:
@@ -670,10 +559,10 @@ def main() -> None:
         print(f"[Build] Target shuffle enabled: {target_shuffle}")
     traj_train, traj_val, traj_test = build_trajectories(
         df_cnn, df_morph, df_tgt,
-        n_cells_per_bag=train_cfg.get("n_cells_per_bag", 500),
-        split_ratios=(0.7, 0.15, 0.15),
+        n_cells_per_bag=n_cells_per_bag,
+        split_ratios=split_ratios,
         split_strategy=split_strategy,
-        window_size=train_cfg.get("window_size", 4),
+        window_size=window_size,
         target_shuffle=target_shuffle,
         seed=0,
         split_seed=split_seed,
@@ -686,12 +575,12 @@ def main() -> None:
     traj_val = _filter_condition(traj_val, target_condition)
     traj_test = _filter_condition(traj_test, target_condition)
 
-    ds_train, ds_val, ds_test = _build_datasets(
+    ds_train, ds_val, ds_test = create_datasets(
         traj_train,
         traj_val,
         traj_test,
-        window_size=train_cfg.get("window_size", 4),
-        predict_last=True,
+        window_size=window_size,
+        predict_last=predict_last,
         overfit_n=train_cfg.get("overfit_n", 0),
     )
     print(f"[Dataset] train={len(ds_train)} | val={len(ds_val)} | test={len(ds_test)}")
@@ -709,36 +598,46 @@ def main() -> None:
         use_morph,
         use_cnn,
         target_condition,
-        train_cfg.get("window_size", 4),
+        window_size,
     )
     os.makedirs(run_dir, exist_ok=True)
     scaler_path = os.path.join(run_dir, f"scaler_{target_condition}.pt")
     torch.save({"y_mean": y_mean, "y_std": y_std}, scaler_path)
     print("[Saved scaler]", scaler_path)
 
-    dl_train, dl_val = _build_loaders(
+    dl_train, dl_val = create_loaders(
         ds_train,
         ds_val,
-        batch_size=train_cfg.get("batch_size", 8),
+        batch_size=batch_size,
         generator=generator,
     )
 
     batch0 = next(iter(dl_train))
     time_scale = _build_time_scale(traj_train, target_condition, model_cfg.get("time_scale"))
-    model = _build_model(
-        model_cfg=model_cfg,
+    model = create_model(
         model_type=model_type,
         fusion_type=fusion_type,
         use_morph=use_morph,
         use_cnn=use_cnn,
-        Dm=batch0["morph"].shape[-1],
-        Dc=batch0["bags"].shape[-1],
+        input_dims={"morph": batch0["morph"].shape[-1], "cnn": batch0["bags"].shape[-1]},
         time_scale=time_scale,
+        model_params=model_cfg,
     ).to(device)
 
     optimizer = _build_optimizer(model, train_cfg)
     scheduler = _build_scheduler(optimizer, train_cfg)
 
+    # -------------------------------------------------------------
+    # Masking setup
+    # -------------------------------------------------------------
+    fixed_mask_idx = train_cfg.get("fixed_mask_index", -1)
+    mask_transform = None
+    if fixed_mask_idx >= 0:
+        print(f"[Masking] Enabled fixed mask at index {fixed_mask_idx}")
+        mask_transform = partial(apply_time_mask, fixed_mask_idx=fixed_mask_idx)
+
+
+    
     ckpt_path, best_val_raw, best_val_norm = _train_loop(
         model=model,
         dl_train=dl_train,
@@ -752,6 +651,7 @@ def main() -> None:
         run_dir=run_dir,
         model_type=model_type,
         target_condition=target_condition,
+        batch_transform=mask_transform,  # PASS TRANSFORM
     )
 
     print("[Done] best_val_mse_raw  =", best_val_raw)
@@ -784,6 +684,7 @@ def main() -> None:
         target_shuffle=target_shuffle,
         split_seed=split_seed,
         run_dir=run_dir,
+        split_ratios=split_ratios,
     )
 
     if eval_cfg.get("eval_looto", False) and len(ds_test) > 0:
@@ -797,7 +698,7 @@ def main() -> None:
             target_names=TARGET_NAMES,
             run_dir=run_dir,
             condition=target_condition,
-            window_size=train_cfg.get("window_size", 4),
+            window_size=window_size,
         )
 
 

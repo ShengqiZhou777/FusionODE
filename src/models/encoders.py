@@ -60,10 +60,14 @@ class AttentionMIL(nn.Module):
         dropout: float = 0.0,
         gated: bool = True,
         return_attention: bool = False,
+        layernorm: bool = True,
     ):
         super().__init__()
         self.return_attention = return_attention
         self.gated = gated
+        
+        # input norm
+        self.ln = nn.LayerNorm(in_dim) if layernorm else nn.Identity()
 
         # instance embedding before pooling
         self.phi = nn.Sequential(
@@ -92,6 +96,9 @@ class AttentionMIL(nn.Module):
 
         x = bags.reshape(BW, N, Din)       # [BW,N,Din]
         m = mask.reshape(BW, N)            # [BW,N]
+        
+        # normalize
+        x = self.ln(x)
 
         # embed instances
         h = self.phi(x)                    # [BW,N,Dout]

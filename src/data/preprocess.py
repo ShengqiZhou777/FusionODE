@@ -142,9 +142,10 @@ def build_trajectories(
 
         return time_split
     # --- 找列 ---
-    cnn_feat_cols = [c for c in df_cnn.columns if c.startswith("cnn_pca_")]
+    # --- 找列 ---
+    cnn_feat_cols = [c for c in df_cnn.columns if c.startswith("cnn_pca_") or c.startswith("cnn_feat_") or c.startswith("cnn_raw_")]
     if len(cnn_feat_cols) == 0:
-        raise ValueError("cnn_features_pca.csv 中找不到 cnn_pca_* 列")
+        raise ValueError("cnn_features_pca.csv 中找不到 cnn_pca_*, cnn_feat_*, 或 cnn_raw_* 列")
 
     non_feat = {"time", "condition", "cell_id"}
     morph_feat_cols = [c for c in df_morph.columns if c not in non_feat]

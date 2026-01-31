@@ -1,0 +1,54 @@
+run:
+  name: "default_run"
+
+data:
+  # Paths can be overridden if needed, defaults are in the script
+  # cnn_path: "data/cnn_features_pca.csv"
+  # morph_path: "data/morph_features.csv"
+  # target_path: "data/result.csv"
+  
+  split_strategy: "cell"       # "cell" or "time"
+  split_seed: 0
+  bag_seed: 0
+  target_shuffle: "none"
+
+model:
+  type: "odernn"               # "odernn", "gru", "lstm", "static"
+  fusion_type: "cross_attention" # "cross_attention", "concat"
+  use_morph: false
+  use_cnn: true
+  
+  # Model architecture
+  hidden_dim: 128
+  ode_hidden: 128
+  rnn_hidden: 128
+  rnn_layers: 1
+  dropout: 0.1
+  attn_dim: 64
+  attn_heads: 4
+  
+  # Time features
+  time_features: "absolute+delta" # "absolute", "absolute+delta", "none"
+  time_scale: 72.0                # Normalization scale for time
+
+train:
+  target_condition: "Light"
+  window_size: 4
+  n_cells_per_bag: 500
+  
+  batch_size: 8
+  epochs: 400
+  lr: 1.0e-3
+  weight_decay: 1.0e-4
+  patience: 30
+  grad_clip: 1.0
+  
+  use_scheduler: true
+  scheduler_factor: 0.5
+  scheduler_patience: 5
+  min_lr: 1.0e-6
+
+eval:
+  mc_test_runs: 20
+  mc_test_base_seed: 1000
+  eval_looto: false

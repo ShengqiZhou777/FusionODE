@@ -59,7 +59,7 @@
 #     return float(sum(losses) / max(len(losses), 1))
 # src/train/engine.py
 from __future__ import annotations
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, Callable
 import numpy as np
 import torch
 
@@ -83,6 +83,7 @@ def eval_one_epoch(
     y_std: Optional[torch.Tensor] = None,
     return_preds: bool = False,
     target_names: Optional[list[str]] = None,
+    batch_transform: Optional[Callable[[Dict], Dict]] = None,
 ) -> Dict[str, float] | tuple[Dict[str, float], np.ndarray, np.ndarray]:
     """
     Returns dict:
@@ -93,6 +94,7 @@ def eval_one_epoch(
       - r2_{target}: R2 for each target
       
     If return_preds is True, returns (out_dict, Y_numpy, YH_numpy) instead.
+    If batch_transform is provided, it is applied to the batch before moving to device.
     """
     model.eval()
     
@@ -107,6 +109,8 @@ def eval_one_epoch(
     mse_raw_list, mse_norm_list = [], []
 
     for batch in dataloader:
+        if batch_transform is not None:
+            batch = batch_transform(batch)
         batch = _to_device(batch, device)
         y_hat = model(batch)   # model 输出默认为 raw units: [B,4]
         y = batch["y"]
@@ -160,6 +164,7 @@ def train_one_epoch(
     y_mean: Optional[torch.Tensor] = None,
     y_std: Optional[torch.Tensor] = None,
     grad_clip: float | None = 1.0,
+    batch_transform: Optional[Callable[[Dict], Dict]] = None,
 ) -> Dict[str, float]:
     """
     Train with mse_norm if y_mean/y_std provided, else mse_raw.
@@ -177,6 +182,8 @@ def train_one_epoch(
         y_std = y_std.to(device)
 
     for batch in dataloader:
+        if batch_transform is not None:
+            batch = batch_transform(batch)
         batch = _to_device(batch, device)
 
         optimizer.zero_grad(set_to_none=True)

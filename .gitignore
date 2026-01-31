@@ -7,7 +7,7 @@ __pycache__/
 env/
 
 # Data (Too large for GitHub)
-# data/*.csv
+data/*.csv
 data/*.pt
 
 # Experiment Runs & Checkpoints
